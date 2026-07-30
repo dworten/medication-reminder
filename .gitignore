@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Secrets — never commit these. Real config lives in .env locally and in
+# Railway's Variables tab in the cloud.
+.env
+.env.*
+!.env.example
+
+# Logs (legacy local file logs; the app now logs to stdout only)
+logs/
+*.log
+npm-debug.log*
+
+# Tooling / platform
+.railway/
+.vercel/
+.cache/
+coverage/
+
+# Local tool settings
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

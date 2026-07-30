@@ -1,0 +1,21 @@
+{
+  "name": "medication-reminder",
+  "version": "1.0.0",
+  "description": "Automated medication reminder phone calls via Twilio",
+  "main": "app.js",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js",
+    "test:morning": "node app.js --test morning",
+    "test:evening": "node app.js --test evening"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "twilio": "^5.3.1"
+  }
+}

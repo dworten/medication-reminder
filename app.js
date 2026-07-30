@@ -1,0 +1,153 @@
+'use strict';
+
+// Loads .env locally; a no-op on Railway, where variables come from the
+// service's environment directly.
+require('dotenv').config();
+
+const express     = require('express');
+const config      = require('./src/config');
+const logger      = require('./src/logger');
+const twimlRouter = require('./src/twimlHandler');
+const scheduler   = require('./src/scheduler');
+const callManager = require('./src/callManager');
+const { requireTriggerSecret } = require('./src/security');
+
+const app = express();
+
+// Railway terminates TLS at its edge and forwards over http, so without this
+// req.ip is the proxy's address rather than the caller's.
+app.set('trust proxy', true);
+
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+
+// TwiML webhook routes — Twilio POSTs here during live calls.
+// Signature-guarded inside the router.
+app.use('/webhook', twimlRouter);
+
+// Manual trigger: POST /trigger?dose=morning  (or body: { "dose": "morning" })
+// Useful for ad-hoc testing without waiting for the cron schedule.
+// Guarded by TRIGGER_SECRET — this places real, billable calls.
+app.post('/trigger', requireTriggerSecret, async (req, res) => {
+  const dose = (req.body.dose || req.query.dose || 'morning').toLowerCase();
+  const target = (req.body.target || req.query.target || 'grandma').toLowerCase();
+  if (!['morning', 'evening'].includes(dose)) {
+    return res.status(400).json({ error: 'dose must be "morning" or "evening"' });
+  }
+  if (!['grandma', 'test'].includes(target)) {
+    return res.status(400).json({ error: 'target must be "grandma" or "test"' });
+  }
+  const to = target === 'test' ? config.testPhone : config.grandmaPhone;
+  if (!to) {
+    return res.status(400).json({ error: `${target === 'test' ? 'TEST_PHONE_NUMBER' : 'GRANDMA_PHONE_NUMBER'} is not set` });
+  }
+  logger.info('Manual trigger', { dose, target });
+  res.json({ ok: true, dose, target, mode: config.mockMode ? 'mock' : 'real' });
+
+  // Fire after response so the HTTP client gets a reply immediately
+  setImmediate(() => {
+    callManager.initiateCall(dose, 1, { to }).catch(err =>
+      logger.error('Trigger call failed', { error: err.message })
+    );
+  });
+});
+
+// Health check — also Railway's healthcheck target.
+// Echoes the resolved baseUrl so you can confirm the webhook URL Twilio will be
+// handed without shelling into the container.
+app.get('/health', (_req, res) => {
+  res.json({
+    status:   'ok',
+    mode:     config.mockMode ? 'mock' : 'real',
+    timezone: config.timezone,
+    baseUrl:  config.baseUrl,
+    uptime:   Math.round(process.uptime()),
+  });
+});
+
+// Mock mode drives an interactive readline prompt, which needs a terminal.
+// On Railway stdin is closed, so it would sit waiting for input that never
+// arrives and place no calls at all — fail fast instead.
+function assertMockModeIsRunnable() {
+  const onRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
+  if (config.mockMode && (onRailway || config.nodeEnv === 'production')) {
+    logger.error('MOCK_MODE=true cannot run here — it needs an interactive terminal. Set MOCK_MODE=false.');
+    process.exit(1);
+  }
+}
+
+function assertConfigIsValid() {
+  const problems = config.validate();
+  if (problems.length) {
+    logger.error('Refusing to start — configuration is incomplete', { problems });
+    for (const p of problems) console.error(`  x ${p}`);
+    process.exit(1);
+  }
+}
+
+// CLI: node app.js --test [morning|evening]
+// In test mode skip the server entirely — mock calls don't need webhooks,
+// and skipping the listen avoids port conflicts on repeated runs.
+const testIdx = process.argv.indexOf('--test');
+if (testIdx !== -1) {
+  const dose = (process.argv[testIdx + 1] || 'morning').toLowerCase();
+  if (!['morning', 'evening'].includes(dose)) {
+    console.error('Usage: node app.js --test [morning|evening]');
+    process.exit(1);
+  }
+  assertMockModeIsRunnable();
+  assertConfigIsValid();
+  callManager.initiateCall(dose, 1)
+    .then(() => process.exit(0))
+    .catch(err => {
+      logger.error('CLI test failed', { error: err.message });
+      process.exit(1);
+    });
+} else {
+  assertMockModeIsRunnable();
+  assertConfigIsValid();
+
+  const server = app.listen(config.port, () => {
+    logger.info('Medication reminder started', {
+      port:     config.port,
+      mode:     config.mockMode ? 'mock' : 'real',
+      timezone: config.timezone,
+      baseUrl:  config.baseUrl,
+    });
+
+    scheduler.start();
+
+    if (config.mockMode) {
+      console.log('');
+      console.log('  MOCK MODE is ON — no real Twilio calls will be made.');
+      console.log('  To run a test right now (in a new terminal):');
+      console.log('    npm run test:morning');
+      console.log('    npm run test:evening');
+      console.log('');
+    }
+  });
+
+  // Railway sends SIGTERM on every deploy. Stop the cron jobs and drain
+  // in-flight requests instead of dying mid-webhook.
+  //
+  // Note: a pending in-memory retry (callManager's setTimeout) is still lost on
+  // restart — that's what the DB-backed retry sweeper in phase 2 fixes.
+  let shuttingDown = false;
+  function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info('Shutting down', { signal });
+
+    scheduler.stop();
+    server.close(() => {
+      logger.info('Shutdown complete');
+      process.exit(0);
+    });
+
+    // Don't hang forever if a connection refuses to close.
+    setTimeout(() => process.exit(0), 10000).unref();
+  }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+}
