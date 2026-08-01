@@ -8,9 +8,10 @@ const express     = require('express');
 const config      = require('./src/config');
 const logger      = require('./src/logger');
 const twimlRouter = require('./src/twimlHandler');
-const scheduler   = require('./src/scheduler');
-const callManager = require('./src/callManager');
-const database    = require('./src/db');
+const scheduler    = require('./src/scheduler');
+const retrySweeper = require('./src/retrySweeper');
+const callManager  = require('./src/callManager');
+const database     = require('./src/db');
 const { requireTriggerSecret } = require('./src/security');
 
 const app = express();
@@ -179,6 +180,11 @@ if (testIdx !== -1) {
 
     scheduler.start();
 
+    // Runs on its own minute tick, independent of the scheduler: a retry queued
+    // before a restart is picked up by whichever process comes back, which is
+    // the whole point of persisting it.
+    retrySweeper.start();
+
     if (config.mockMode) {
       console.log('');
       console.log('  MOCK MODE is ON — no real Twilio calls will be made.');
@@ -192,8 +198,10 @@ if (testIdx !== -1) {
   // Railway sends SIGTERM on every deploy. Stop the cron jobs and drain
   // in-flight requests instead of dying mid-webhook.
   //
-  // Note: a pending in-memory retry (callManager's setTimeout) is still lost on
-  // restart — that's what the DB-backed retry sweeper in phase 2 fixes.
+  // A pending retry is no longer at risk here: it lives in call_history with
+  // next_retry_at set, so whichever process comes back after the deploy sweeps
+  // it up. Stopping the sweeper cleanly just avoids starting work we cannot
+  // finish before the process exits.
   let shuttingDown = false;
   function shutdown(signal) {
     if (shuttingDown) return;
@@ -201,6 +209,7 @@ if (testIdx !== -1) {
     logger.info('Shutting down', { signal });
 
     scheduler.stop();
+    retrySweeper.stop();
     server.close(async () => {
       await database.disconnect();
       logger.info('Shutdown complete');

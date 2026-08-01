@@ -46,12 +46,15 @@ async function send(to, body) {
     console.log(pad(`To:  ${to}`));
     for (const ln of wrap(body, w - 2)) console.log(pad(ln));
     console.log('└' + line + '┘\n');
-    return;
+    return null;
   }
 
   const client = _twilioClient();
   const msg    = await client.messages.create({ to, from: config.twilioFromNumber, body });
   logger.call('SMS sent', { sid: msg.sid, to });
+  // Returned so the escalation's call_history row can record the Message SID,
+  // which is what you would search Twilio's logs by.
+  return msg.sid;
 }
 
 module.exports = { send };

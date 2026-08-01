@@ -16,6 +16,7 @@ const SUITES = [
   ['scheduleMatch', 'scheduleMatch.test.js', 'pure — no database'],
   ['scheduler',     'scheduler.test.js',     'needs DATABASE_URL'],
   ['twiml',         'twiml.test.js',         'needs DATABASE_URL'],
+  ['sweeper',       'sweeper.test.js',       'needs DATABASE_URL'],
 ];
 
 let failed = 0;

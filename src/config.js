@@ -75,6 +75,19 @@ const config = {
   maxCallAttempts: parseInt(process.env.MAX_CALL_ATTEMPTS    || '3',  10),
   retryDelayMs:    parseInt(process.env.RETRY_DELAY_MINUTES  || '5',  10) * 60 * 1000,
   maxReprompts:    parseInt(process.env.MAX_REPROMPTS        || '3',  10),
+
+  // Retry sweeper.
+  //
+  // How long a sweeper's claim on a queued item stays valid. If a process dies
+  // holding a claim, the item is stuck until this lapses — so it must be long
+  // enough that a slow-but-alive call is never stolen, and short enough that a
+  // crash does not delay a retry past usefulness.
+  retryStaleClaimMinutes: parseInt(process.env.RETRY_STALE_CLAIM_MINUTES || '10', 10),
+
+  // Abandon queued work older than this. A reminder call placed six hours late
+  // is not a reminder, it is a confusing phone call at the wrong time of day —
+  // and without a ceiling a permanently failing item would be retried forever.
+  retryGiveUpHours: parseInt(process.env.RETRY_GIVE_UP_HOURS || '6', 10),
 };
 
 // Fail loudly at boot rather than at 9:20 PM when a call silently can't be placed.

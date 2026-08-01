@@ -173,25 +173,52 @@ async function handleNoAnswer(dose, attempt, ctx = {}) {
   await callHistoryRepo.recordOutcome(ctx.callHistoryId, ctx.outcome || 'NO_ANSWER');
 
   if (attempt < settings.maxAttempts) {
-    const next     = attempt + 1;
-    const delaySec = settings.retryDelayMs / 1000;
-    logger.call('Retry scheduled', { dose, nextAttempt: next, delaySeconds: delaySec });
+    const next  = attempt + 1;
+    const dueAt = new Date(Date.now() + settings.retryDelayMs);
 
-    // Still an in-memory timer at this stage — Stage 3 replaces it with the
-    // database-backed sweeper, which is what makes a retry survive a restart.
-    setTimeout(async () => {
-      try {
-        await initiateCall(dose, next, { schedule });
-      } catch (err) {
-        logger.error('Retry call failed', { error: err.message, dose, attempt: next });
-        if (next >= settings.maxAttempts) {
-          await _escalate(dose, 'call failure on final retry', schedule);
-        }
-      }
-    }, settings.retryDelayMs);
+    // Persisted, not a setTimeout. The old in-memory timer lived only in this
+    // process, so a Railway deploy inside the retry window dropped the retry
+    // and the missed-dose SMS that should have followed — silently. Writing
+    // next_retry_at means a restart costs a minute of delay, not the dose.
+    const persisted = await _persistRetry(ctx.callHistoryId, dueAt, { dose, nextAttempt: next });
+
+    if (persisted) {
+      logger.call('Retry persisted', {
+        dose, nextAttempt: next, dueAt: dueAt.toISOString(), callHistoryId: ctx.callHistoryId,
+      });
+    } else {
+      // Deliberately no in-memory fallback: reintroducing a timer here would
+      // bring back the very failure this replaced, and worse, could double-call
+      // if the write actually landed. Escalate instead — a caregiver alert is
+      // strictly better than a retry nobody knows was lost.
+      logger.error('RETRY LOST — could not persist next_retry_at; escalating instead', {
+        dose, nextAttempt: next, callHistoryId: ctx.callHistoryId,
+      });
+      await escalate(dose, 'retry could not be scheduled (database unavailable)', schedule, ctx);
+    }
   } else {
-    await _escalate(dose, `no answer after all ${settings.maxAttempts} attempts`, schedule);
+    await escalate(dose, `no answer after all ${settings.maxAttempts} attempts`, schedule, ctx);
   }
+}
+
+// The sweeper depends on this write, so it gets more than one shot at it before
+// we conclude the retry is unrecoverable.
+async function _persistRetry(callHistoryId, dueAt, meta, tries = 3) {
+  if (!callHistoryId) {
+    logger.error('No call_history row to attach a retry to — the database was unreachable when this call was placed', meta);
+    return false;
+  }
+
+  for (let i = 1; i <= tries; i++) {
+    try {
+      await callHistoryRepo.scheduleRetry(callHistoryId, dueAt);
+      return true;
+    } catch (err) {
+      logger.error(`Could not persist retry (attempt ${i}/${tries})`, { error: err.message, ...meta });
+      if (i < tries) await new Promise(r => setTimeout(r, 300 * i));
+    }
+  }
+  return false;
 }
 
 // Triggered by twimlHandler when max reprompts are exhausted inside an
@@ -205,14 +232,76 @@ async function handleNeverConfirmed(dose, attempt, ctx = {}) {
     repromptCount: ctx.repromptCount,
   });
 
-  await _escalate(dose, 'answered but never confirmed medication taken', schedule);
+  await escalate(dose, 'answered but never confirmed medication taken', schedule, ctx);
 }
 
-// Stage 4 generalises this into a configurable chain (fallback call, then SMS)
-// driven by the schedule's escalation columns. For now it keeps today's
-// behaviour, but sources the number from the schedule's escalation contact when
-// there is one.
-async function _escalate(dose, reason, schedule = null) {
+// Queues an escalation rather than sending it inline.
+//
+// Sending inline meant a crash between "attempts exhausted" and "SMS sent" lost
+// the alert with nothing to recover it. Writing the row first makes the alert
+// durable; the sweeper is then kicked immediately, so in the normal case it
+// still goes out within a second rather than waiting for the next tick.
+//
+// Stage 4 turns this into a configurable chain (fallback call, then SMS) driven
+// by the schedule's escalation columns. The queue mechanism is already the
+// right shape for it: each step becomes its own row.
+async function escalate(dose, reason, schedule = null, ctx = {}) {
+  const accountId = (schedule && schedule.accountId) || await _defaultAccountId();
+
+  if (!accountId) {
+    logger.error('Cannot queue escalation — no account; sending inline as a last resort', { dose, reason });
+    return _sendEscalationInline(dose, reason, schedule);
+  }
+
+  try {
+    const row = await callHistoryRepo.enqueueEscalation({
+      accountId,
+      scheduleId: schedule ? schedule.id : (ctx.scheduleId || null),
+      contactId:  schedule && schedule.escalationContact ? schedule.escalationContact.id : null,
+      dose,
+      kind:   'ESCALATION_SMS',
+      reason,
+      dueAt:  new Date(),
+    });
+
+    logger.call('Escalation queued', { callHistoryId: row.id, dose, reason });
+
+    // Kick the sweeper so the alert does not wait out the tick interval.
+    // Fire-and-forget: if this fails the next tick picks the row up anyway,
+    // which is the entire point of queueing it first.
+    setImmediate(() => {
+      require('./retrySweeper').runOnce().catch(err =>
+        logger.error('Immediate escalation sweep failed (the next tick will retry)', { error: err.message })
+      );
+    });
+  } catch (err) {
+    logger.error('Could not queue escalation, sending inline instead', { error: err.message, dose, reason });
+
+    // Last line of defence. If this fails too the alert is genuinely gone, and
+    // that deserves its own unmistakable log line rather than surfacing as a
+    // generic handler error three frames up — this is the case where a missed
+    // dose goes unnoticed by anyone.
+    try {
+      await _sendEscalationInline(dose, reason, schedule);
+    } catch (sendErr) {
+      logger.error('ESCALATION LOST — could not queue it and could not send it', {
+        dose,
+        reason,
+        queueError: err.message,
+        sendError:  sendErr.message,
+      });
+    }
+  }
+}
+
+function _escalationBody(dose, reason, timezone) {
+  const timeStr = new Date().toLocaleString('en-US', { timeZone: timezone || config.timezone });
+  return `MEDICATION ALERT: Could not confirm ${dose} dose taken as of ${timeStr}. (${reason})`;
+}
+
+// Last resort when the row could not be written at all. Not durable — but an
+// alert attempted is better than no alert.
+async function _sendEscalationInline(dose, reason, schedule) {
   const smsAlert = require('./smsAlert');
 
   const to = (schedule && schedule.escalationContact && schedule.escalationContact.phone)
@@ -223,17 +312,46 @@ async function _escalate(dose, reason, schedule = null) {
     return;
   }
 
-  const timezone = (schedule && schedule.timezone) || config.timezone;
-  const timeStr  = new Date().toLocaleString('en-US', { timeZone: timezone });
-  const body     = `MEDICATION ALERT: Could not confirm ${dose} dose taken as of ${timeStr}. (${reason})`;
+  await smsAlert.send(to, _escalationBody(dose, reason, schedule && schedule.timezone));
+}
 
-  await smsAlert.send(to, body);
+// Called by the sweeper for a queued escalation row. Throwing here is
+// meaningful: the sweeper releases the claim and tries again next minute.
+async function deliverEscalation(row) {
+  const smsAlert = require('./smsAlert');
+  const schedule = row.schedule || null;
+
+  const to = (row.contact && row.contact.phone)
+    || (schedule && schedule.escalationContact && schedule.escalationContact.phone)
+    || config.caregiverPhone;
+
+  if (!to) {
+    // Unfixable by retrying — record it and let the sweeper close the item out
+    // rather than looping on it forever.
+    await callHistoryRepo.recordOutcome(row.id, 'FAILED', {
+      errorMessage: `${row.errorMessage} | no escalation destination configured`,
+    });
+    logger.error('Escalation has nowhere to go — set an escalation contact or CAREGIVER_PHONE_NUMBER', {
+      callHistoryId: row.id, dose: row.dose,
+    });
+    return;
+  }
+
+  const body = _escalationBody(row.dose, row.errorMessage || 'unconfirmed dose', schedule && schedule.timezone);
+  const sid  = await smsAlert.send(to, body);
+
+  await callHistoryRepo.recordOutcome(row.id, 'SENT');
+  if (sid) await callHistoryRepo.attachCallSid(row.id, sid);
+
+  logger.call('Escalation delivered', { callHistoryId: row.id, to, dose: row.dose });
 }
 
 module.exports = {
   initiateCall,
   handleNoAnswer,
   handleNeverConfirmed,
+  escalate,
+  deliverEscalation,
   resolveSettings,
   loadScheduleContext,
 };

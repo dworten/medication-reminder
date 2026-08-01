@@ -26,6 +26,7 @@ src/
   logger.js         Structured JSON to stdout (Railway captures it)
   scheduler.js      Ticks every minute, fires whatever the DB says is due
   scheduleMatch.js  Pure timezone/day matching — no DB, no clock, fully testable
+  retrySweeper.js   Ticks every minute, does the retries/escalations the DB owes
   callManager.js    Routes to mock or real, owns retry + escalation logic
   twimlHandler.js   Express router: /webhook/initial /response /status
   security.js       Twilio signature validation + /trigger secret
@@ -70,6 +71,24 @@ the schedule unclaimed and trigger a second call on the next tick.
 the container happened to be restarting during that one minute. A schedule now
 stays due for `SCHEDULE_GRACE_MINUTES` (default 5), turning "missed entirely"
 into "a few minutes late".
+
+**Retries survive restarts.** A retry used to be a `setTimeout` living only in
+the process, so a Railway deploy inside the five-minute retry window took the
+retry with it — and the missed-dose SMS that should have followed never
+happened, silently. Now an unanswered call writes `next_retry_at` on its
+`call_history` row and a sweeper picks it up a minute later. Escalations are
+queued the same way rather than sent inline, so a crash between "attempts
+exhausted" and "SMS sent" cannot lose the alert either; the sweeper is kicked
+immediately after queueing, so in the normal case it still goes out at once.
+
+The ordering is claim → do → complete. Completing is last on purpose: a process
+that dies mid-flight leaves the item queued, so the failure mode is a repeat
+rather than a loss — and repeats are suppressed by checking whether that attempt
+already exists. A claim held by a process that died lapses after
+`RETRY_STALE_CLAIM_MINUTES` and is picked up again. Work older than
+`RETRY_GIVE_UP_HOURS` is abandoned: a reminder six hours late is a confusing
+call at the wrong time of day, and without a ceiling a permanently failing item
+would retry forever.
 
 **Webhook compatibility.** `dose` and `attempt` remain in the webhook URLs
 exactly as before; `sched`, `ch` and `mr` are appended and every one is

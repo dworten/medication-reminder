@@ -50,6 +50,18 @@ async function assertScratchDatabase(prisma) {
   }
 }
 
+// escalate() queues a row and then kicks a sweep in the background, so the SMS
+// normally goes out within milliseconds rather than waiting for the next tick.
+// Tests have to let that settle before asserting, or they race it.
+async function waitFor(predicate, { timeoutMs = 5000, everyMs = 25 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await new Promise(r => setTimeout(r, everyMs));
+  }
+  return false;
+}
+
 async function truncateAll(prisma) {
   // FK-safe order: schedules reference contacts with RESTRICT.
   await prisma.callHistory.deleteMany({});
@@ -59,4 +71,4 @@ async function truncateAll(prisma) {
   await prisma.account.deleteMany({});
 }
 
-module.exports = { check, contains, section, summary, assertScratchDatabase, truncateAll };
+module.exports = { check, contains, section, summary, assertScratchDatabase, truncateAll, waitFor };
