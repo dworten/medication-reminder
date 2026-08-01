@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 
+# Generated Prisma client — rebuilt by `prisma generate` (npm postinstall).
+# The schema and migrations under prisma/ ARE committed; this output is not.
+src/generated/
+
 # Secrets — never commit these. Real config lives in .env locally and in
 # Railway's Variables tab in the cloud.
 .env

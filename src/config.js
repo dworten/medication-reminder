@@ -36,6 +36,13 @@ const config = {
   morningCron: process.env.MORNING_CRON || '20 9 * * *',
   eveningCron: process.env.EVENING_CRON || '20 21 * * *',
 
+  // Database
+  // Railway injects this from the Postgres service reference variable. Not yet
+  // required to boot: through Stage 1 nothing in the call path reads it, so a
+  // missing or unreachable database must not stop calls going out. Stage 2
+  // makes it mandatory, because by then the schedules live in it.
+  databaseUrl: process.env.DATABASE_URL || '',
+
   // Server
   port:    parseInt(process.env.PORT || '3000', 10),
   baseUrl: resolveBaseUrl(),

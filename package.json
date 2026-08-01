@@ -10,12 +10,21 @@
     "start": "node app.js",
     "dev": "node --watch app.js",
     "test:morning": "node app.js --test morning",
-    "test:evening": "node app.js --test evening"
+    "test:evening": "node app.js --test evening",
+    "postinstall": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "db:seed": "prisma db seed"
   },
   "dependencies": {
+    "@prisma/adapter-pg": "^7.9.1",
+    "@prisma/client": "^7.9.1",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "node-cron": "^3.0.3",
+    "pg": "^8.22.0",
+    "prisma": "^7.9.1",
     "twilio": "^5.3.1"
   }
 }

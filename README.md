@@ -13,7 +13,13 @@ Calls are placed at **9:20 AM and 9:20 PM US Central** by default (morning calls
 ```
 app.js              Express server, /trigger, /health, --test CLI, graceful shutdown
 railway.json        Railway build/deploy config (healthcheck, single replica)
+prisma.config.js    Prisma CLI config — connection URL + .env loading (Prisma 7)
+prisma/
+  schema.prisma     Data model: accounts, contacts, messages, schedules, call_history
+  migrations/       Version-controlled SQL, applied with `prisma migrate deploy`
 src/
+  db.js             Shared PrismaClient (lazy; the app boots without a database)
+  generated/prisma  Generated client — gitignored, rebuilt by `prisma generate`
   config.js         Env → config, resolves BASE_URL, validates at boot
   logger.js         Structured JSON to stdout (Railway captures it)
   scheduler.js      node-cron fires at 9:20 AM / 9:20 PM (Central)

@@ -1,0 +1,236 @@
+// Medication reminder — data model.
+//
+// Every table carries account_id from day one. Only one account exists today,
+// but designing it in now means the Phase 3 API and any future second user do
+// not need a migration that rewrites every row.
+//
+// Naming: Prisma models are PascalCase/camelCase (idiomatic JS), mapped to
+// snake_case tables and columns so raw SQL and Prisma Studio read cleanly.
+
+// Deliberately the legacy `prisma-client-js` generator, not Prisma 7's newer
+// `prisma-client`. The new one emits TypeScript source and expects the project
+// to compile it; this is a plain CommonJS JS app with no build step, and adding
+// tsc to the Railway build to satisfy an ORM is not a trade worth making.
+// `prisma-client-js` still ships in v7 and emits require()-able CommonJS.
+//
+// Generated into src/ rather than node_modules so the client is a visible,
+// reviewable artifact. It is gitignored — `prisma generate` recreates it.
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+// Prisma 7 removed `url` from the datasource block: the CLI reads it from
+// prisma.config.js, and the running client gets it via the pg driver adapter in
+// src/db.js.
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+// A hint for grouping people in a future UI. It deliberately does NOT decide
+// who gets called: that is a property of the schedule (contactId vs
+// escalationContactId), so the same person can be the recipient on one
+// schedule and the fallback on another.
+enum ContactRole {
+  RECIPIENT
+  CAREGIVER
+  BOTH
+
+  @@map("contact_role")
+}
+
+// TTS   → Twilio <Say> with ttsText
+// AUDIO → Twilio <Play> with audioUrl
+enum MessageKind {
+  TTS
+  AUDIO
+
+  @@map("message_kind")
+}
+
+// What a call_history row represents. Stage 4 logs every escalation step as its
+// own row, so the chain is auditable rather than inferred from a flag.
+enum CallKind {
+  REMINDER_CALL
+  ESCALATION_CALL
+  ESCALATION_SMS
+
+  @@map("call_kind")
+}
+
+enum CallOutcome {
+  PENDING       // placed, no terminal status yet
+  CONFIRMED     // she pressed 1 / said yes
+  NOT_CONFIRMED // answered, but never confirmed after all reprompts
+  NO_ANSWER
+  BUSY
+  FAILED        // Twilio rejected it, or the API call threw
+  SENT          // ESCALATION_SMS delivered to Twilio
+  CANCELED
+
+  @@map("call_outcome")
+}
+
+// ─── Tables ───────────────────────────────────────────────────────────────────
+
+model Account {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @unique
+  name      String?
+  timezone  String   @default("America/Chicago")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  contacts    Contact[]
+  messages    Message[]
+  schedules   Schedule[]
+  callHistory CallHistory[]
+
+  @@map("accounts")
+}
+
+model Contact {
+  id        String      @id @default(uuid()) @db.Uuid
+  accountId String      @map("account_id") @db.Uuid
+  name      String
+  phone     String // E.164, e.g. +15125550123
+  notes     String?
+  role      ContactRole @default(RECIPIENT)
+  isActive  Boolean     @default(true) @map("is_active")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  // Restrict, not Cascade: deleting a contact must not silently delete the
+  // schedules that call her, or the history of calls already placed.
+  schedulesAsRecipient  Schedule[]    @relation("ScheduleRecipient")
+  schedulesAsEscalation Schedule[]    @relation("ScheduleEscalation")
+  callHistory           CallHistory[]
+
+  @@unique([accountId, phone])
+  @@index([accountId])
+  @@map("contacts")
+}
+
+model Message {
+  id        String      @id @default(uuid()) @db.Uuid
+  accountId String      @map("account_id") @db.Uuid
+  name      String // "Morning reminder"
+  kind      MessageKind @default(TTS)
+  ttsText   String?     @map("tts_text")
+  audioUrl  String?     @map("audio_url")
+  // Twilio <Say> attributes, only meaningful when kind = TTS.
+  // null voice = Twilio's default, which is what the app uses today.
+  voice     String?
+  language  String?
+  // At most one default per account, enforced by a partial unique index added
+  // by hand in the migration (Prisma cannot express `WHERE is_default`).
+  isDefault Boolean     @default(false) @map("is_default")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  account   Account    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  schedules Schedule[]
+
+  @@index([accountId])
+  @@map("messages")
+}
+
+model Schedule {
+  id        String @id @default(uuid()) @db.Uuid
+  accountId String @map("account_id") @db.Uuid
+  name      String // "Morning meds"
+
+  // 'morning' | 'evening'. Stored as a plain string, not an enum, on purpose:
+  // this exact value travels in the Twilio webhook query string
+  // (/webhook/initial?dose=morning) and picks the goodbye line in
+  // twimlHandler. Keeping it a string means zero translation in the live call
+  // path, which is the part that must not break.
+  dose String
+
+  // Android-clock semantics: a wall-clock time plus a set of days, resolved in
+  // `timezone`. Not a cron string — a UI can render this directly.
+  timeOfDay  String @map("time_of_day") // "09:20", 24-hour
+  daysOfWeek Int[]  @map("days_of_week") // 0 = Sunday .. 6 = Saturday
+  timezone   String @default("America/Chicago")
+
+  enabled Boolean @default(true)
+
+  contactId String  @map("contact_id") @db.Uuid
+  messageId String? @map("message_id") @db.Uuid
+
+  // ── Escalation settings (defaults mirror today's env vars) ──
+  maxAttempts         Int     @default(3) @map("max_attempts")
+  retryDelayMinutes   Int     @default(5) @map("retry_delay_minutes")
+  maxReprompts        Int     @default(3) @map("max_reprompts")
+  escalationContactId String? @map("escalation_contact_id") @db.Uuid
+  escalateWithCall    Boolean @default(false) @map("escalate_with_call")
+  escalateWithSms     Boolean @default(true) @map("escalate_with_sms")
+
+  // Set by the scheduler after a successful fire, so a restart inside the same
+  // minute cannot fire the same schedule twice.
+  lastFiredAt DateTime? @map("last_fired_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  account           Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  contact           Contact       @relation("ScheduleRecipient", fields: [contactId], references: [id], onDelete: Restrict)
+  escalationContact Contact?      @relation("ScheduleEscalation", fields: [escalationContactId], references: [id], onDelete: Restrict)
+  message           Message?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  callHistory       CallHistory[]
+
+  @@index([accountId])
+  @@index([enabled])
+  @@map("schedules")
+}
+
+model CallHistory {
+  id        String  @id @default(uuid()) @db.Uuid
+  accountId String  @map("account_id") @db.Uuid
+  // Null for manual /trigger test calls, which belong to no schedule.
+  // SetNull rather than Cascade: deleting a schedule must not erase the
+  // evidence that calls were placed.
+  scheduleId String? @map("schedule_id") @db.Uuid
+  contactId  String? @map("contact_id") @db.Uuid
+
+  kind    CallKind    @default(REMINDER_CALL)
+  dose    String
+  attempt Int         @default(1)
+  repromptCount Int   @default(0) @map("reprompt_count")
+  outcome CallOutcome @default(PENDING)
+
+  // Twilio's Call SID (or Message SID for ESCALATION_SMS). Unique when set;
+  // Postgres allows many NULLs under a unique constraint, which is what we want
+  // for rows created before the API call returns.
+  callSid String? @unique @map("call_sid")
+
+  startedAt   DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  // ── Retry sweeper (Stage 3) ──
+  // nextRetryAt is the durable replacement for the in-memory setTimeout: a
+  // redeploy mid-window loses nothing because the intent lives in Postgres.
+  nextRetryAt    DateTime? @map("next_retry_at")
+  // Claimed atomically by the sweeper before firing, so two processes can never
+  // both pick up the same retry. Replicas stay at 1, but this makes a double
+  // call impossible rather than merely unlikely.
+  retryClaimedAt DateTime? @map("retry_claimed_at")
+
+  errorMessage String? @map("error_message")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  account  Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  schedule Schedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  contact  Contact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, startedAt])
+  @@index([scheduleId, startedAt])
+  @@index([nextRetryAt])
+  @@map("call_history")
+}

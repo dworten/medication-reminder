@@ -10,6 +10,7 @@ const logger      = require('./src/logger');
 const twimlRouter = require('./src/twimlHandler');
 const scheduler   = require('./src/scheduler');
 const callManager = require('./src/callManager');
+const database    = require('./src/db');
 const { requireTriggerSecret } = require('./src/security');
 
 const app = express();
@@ -55,10 +56,19 @@ app.post('/trigger', requireTriggerSecret, async (req, res) => {
 // Health check — also Railway's healthcheck target.
 // Echoes the resolved baseUrl so you can confirm the webhook URL Twilio will be
 // handed without shelling into the container.
-app.get('/health', (_req, res) => {
+//
+// Note the status code: this returns 200 even when the database is down, and
+// reports the database as a field instead. Railway restarts the container when
+// its healthcheck fails, and a process that can still place calls should not be
+// killed over a Postgres blip. Read the `db` field to see the real state.
+app.get('/health', async (_req, res) => {
+  const db = await database.ping();
+
   res.json({
     status:   'ok',
     mode:     config.mockMode ? 'mock' : 'real',
+    db:       db.ok ? 'ok' : 'down',
+    dbReason: db.ok ? undefined : db.reason,
     timezone: config.timezone,
     baseUrl:  config.baseUrl,
     uptime:   Math.round(process.uptime()),
@@ -147,7 +157,8 @@ if (testIdx !== -1) {
     logger.info('Shutting down', { signal });
 
     scheduler.stop();
-    server.close(() => {
+    server.close(async () => {
+      await database.disconnect();
       logger.info('Shutdown complete');
       process.exit(0);
     });
