@@ -56,11 +56,26 @@ function info(msg) {
   console.log(`  ↳  ${msg}`);
 }
 
+// Settings come from the schedule when a schedule fired the call, so a local
+// simulation reflects what the database actually says. Falls back to the env
+// values when called without context.
+function _settings(opts) {
+  return opts.settings || {
+    maxAttempts:  config.maxCallAttempts,
+    maxReprompts: config.maxReprompts,
+    retryDelayMs: config.retryDelayMs,
+  };
+}
+
 // Entry point: simulate placing a call
-async function runMockCall(dose, attempt) {
+// opts: { settings, to }
+async function runMockCall(dose, attempt, opts = {}) {
+  const settings = _settings(opts);
+  const to       = opts.to || config.grandmaPhone;
+
   console.log(`\n${HR}`);
-  console.log(`  MOCK CALL  |  Dose: ${dose.toUpperCase()}  |  Attempt: ${attempt} / ${config.maxCallAttempts}`);
-  console.log(`  Calling:   ${config.grandmaPhone || '(GRANDMA_PHONE_NUMBER not set in .env)'}`);
+  console.log(`  MOCK CALL  |  Dose: ${dose.toUpperCase()}  |  Attempt: ${attempt} / ${settings.maxAttempts}`);
+  console.log(`  Calling:   ${to || '(no contact phone — check the schedule or GRANDMA_PHONE_NUMBER)'}`);
   console.log(HR);
   console.log('  Simulate the phone ringing. Enter a response:\n');
   console.log('    1 or yes       → she picks up and says yes');
@@ -72,7 +87,7 @@ async function runMockCall(dose, attempt) {
 
   if (!input || input === 'no answer' || input === 'noanswer' || input === 'voicemail') {
     logger.call('Mock: no answer', { dose, attempt });
-    await _handleNoAnswer(dose, attempt);
+    await _handleNoAnswer(dose, attempt, opts);
     return;
   }
 
@@ -82,11 +97,12 @@ async function runMockCall(dose, attempt) {
     'Say Yes or No, or type 1 for yes and 2 for no.'
   );
 
-  await _handleResponse(dose, attempt, input, 0);
+  await _handleResponse(dose, attempt, input, 0, opts);
 }
 
 // Recursive response handler — mirrors TwiML /webhook/response logic
-async function _handleResponse(dose, attempt, input, repromptCount) {
+async function _handleResponse(dose, attempt, input, repromptCount, opts = {}) {
+  const settings = _settings(opts);
   const isYes = ['1', 'yes', 'y', 'yep', 'yeah', 'yup'].includes(input);
   const isNo  = ['2', 'no',  'n', 'nope', 'nah'].includes(input);
 
@@ -105,7 +121,7 @@ async function _handleResponse(dose, attempt, input, repromptCount) {
   }
 
   // "No" or unrecognized
-  if (repromptCount >= config.maxReprompts) {
+  if (repromptCount >= settings.maxReprompts) {
     voice("I wasn't able to confirm that you've taken your medicine. Please take it as soon as possible. Goodbye.");
     console.log('\n  ❌  Max reprompts reached without confirmation.\n');
     logger.call('Mock: max reprompts reached', { dose, attempt, repromptCount });
@@ -119,24 +135,25 @@ async function _handleResponse(dose, attempt, input, repromptCount) {
     "Please take your medicine now. I'll ask again. " +
     'Have you taken your medicine? Say Yes or No, or type 1 for yes and 2 for no.'
   );
-  console.log(`\n  (Reprompt ${repromptNum} of ${config.maxReprompts})\n`);
+  console.log(`\n  (Reprompt ${repromptNum} of ${settings.maxReprompts})\n`);
   console.log('    1 or yes → confirmed    2 or no → still no\n');
 
   const next = (await ask('  > ')).toLowerCase();
-  await _handleResponse(dose, attempt, next, repromptNum);
+  await _handleResponse(dose, attempt, next, repromptNum, opts);
 }
 
 // Simulate no-answer with retry logic
-async function _handleNoAnswer(dose, attempt) {
-  const maxAttempts  = config.maxCallAttempts;
-  const delayMinutes = Math.round(config.retryDelayMs / 60000);
+async function _handleNoAnswer(dose, attempt, opts = {}) {
+  const settings     = _settings(opts);
+  const maxAttempts  = settings.maxAttempts;
+  const delayMinutes = Math.round(settings.retryDelayMs / 60000);
 
   if (attempt < maxAttempts) {
     const next = attempt + 1;
     console.log(`\n  📵  No answer. In live mode a retry would fire in ${delayMinutes} min.`);
     console.log(`      Simulating retry ${next} / ${maxAttempts} immediately...\n`);
     logger.call('Mock: no answer, retrying', { dose, attempt, nextAttempt: next });
-    await runMockCall(dose, next);
+    await runMockCall(dose, next, opts);
   } else {
     console.log(`\n  📵  All ${maxAttempts} attempts exhausted.\n`);
     logger.call('Mock: all attempts exhausted', { dose });

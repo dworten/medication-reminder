@@ -29,25 +29,69 @@ app.use('/webhook', twimlRouter);
 // Manual trigger: POST /trigger?dose=morning  (or body: { "dose": "morning" })
 // Useful for ad-hoc testing without waiting for the cron schedule.
 // Guarded by TRIGGER_SECRET — this places real, billable calls.
+// Resolves which schedule a manual trigger should imitate, so a test call uses
+// the same contact, message and escalation settings the real call would.
+// Falls back to the env phone number when nothing is seeded yet.
+async function resolveTriggerSchedule({ scheduleId, dose }) {
+  const scheduleRepo = require('./src/data/schedules');
+
+  if (scheduleId) return scheduleRepo.getById(scheduleId);
+
+  const enabled = await scheduleRepo.listEnabled();
+  return enabled.find(s => s.dose === dose) || null;
+}
+
 app.post('/trigger', requireTriggerSecret, async (req, res) => {
   const dose = (req.body.dose || req.query.dose || 'morning').toLowerCase();
   const target = (req.body.target || req.query.target || 'grandma').toLowerCase();
+  const scheduleId = req.body.scheduleId || req.query.scheduleId || null;
+
   if (!['morning', 'evening'].includes(dose)) {
     return res.status(400).json({ error: 'dose must be "morning" or "evening"' });
   }
   if (!['grandma', 'test'].includes(target)) {
     return res.status(400).json({ error: 'target must be "grandma" or "test"' });
   }
-  const to = target === 'test' ? config.testPhone : config.grandmaPhone;
-  if (!to) {
-    return res.status(400).json({ error: `${target === 'test' ? 'TEST_PHONE_NUMBER' : 'GRANDMA_PHONE_NUMBER'} is not set` });
+
+  let schedule = null;
+  try {
+    schedule = await resolveTriggerSchedule({ scheduleId, dose });
+  } catch (err) {
+    logger.error('Trigger could not load schedule', { error: err.message });
   }
-  logger.info('Manual trigger', { dose, target });
-  res.json({ ok: true, dose, target, mode: config.mockMode ? 'mock' : 'real' });
+
+  if (scheduleId && !schedule) {
+    return res.status(404).json({ error: `no schedule with id ${scheduleId}` });
+  }
+
+  // target=test redirects the call to your own phone while still using the
+  // schedule's message and settings — the point is to hear what she would hear.
+  const to = target === 'test'
+    ? config.testPhone
+    : (schedule && schedule.contact && schedule.contact.phone) || config.grandmaPhone;
+
+  if (!to) {
+    return res.status(400).json({
+      error: target === 'test'
+        ? 'TEST_PHONE_NUMBER is not set'
+        : 'No contact phone — seed a schedule with a contact, or set GRANDMA_PHONE_NUMBER',
+    });
+  }
+
+  logger.info('Manual trigger', { dose, target, scheduleId: schedule ? schedule.id : null });
+
+  res.json({
+    ok:       true,
+    dose,
+    target,
+    mode:     config.mockMode ? 'mock' : 'real',
+    source:   schedule ? 'database' : 'env fallback',
+    schedule: schedule ? { id: schedule.id, name: schedule.name, contact: schedule.contact?.name } : null,
+  });
 
   // Fire after response so the HTTP client gets a reply immediately
   setImmediate(() => {
-    callManager.initiateCall(dose, 1, { to }).catch(err =>
+    callManager.initiateCall(dose, 1, { to, schedule }).catch(err =>
       logger.error('Trigger call failed', { error: err.message })
     );
   });

@@ -1,0 +1,62 @@
+'use strict';
+
+// Minimal assertion helpers — this project has no test framework and does not
+// need one for a handful of suites.
+
+let pass = 0, fail = 0;
+
+function check(label, actual, expected) {
+  const ok = actual === expected;
+  ok ? pass++ : fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}`);
+  if (!ok) {
+    console.log(`        got:  ${JSON.stringify(actual)}`);
+    console.log(`        want: ${JSON.stringify(expected)}`);
+  }
+}
+
+function contains(label, haystack, needle) {
+  const ok = String(haystack).includes(needle);
+  ok ? pass++ : fail++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}`);
+  if (!ok) console.log(`        in: ${haystack}`);
+}
+
+function section(title) {
+  console.log(`\n--- ${title} ---`);
+}
+
+function summary() {
+  console.log(`\n${pass} passed, ${fail} failed`);
+  return fail;
+}
+
+// Guard for the suites that write to a real database.
+//
+// These tests truncate every table. That is fine against a scratch database and
+// catastrophic against the one holding a real medication schedule, so they
+// refuse to run the moment they see an account that is not obviously a fixture.
+// Seed data created by prisma/seed.js uses a real email address and will trip
+// this deliberately.
+async function assertScratchDatabase(prisma) {
+  const accounts = await prisma.account.findMany({ select: { email: true } });
+  const real = accounts.filter(a => !a.email.endsWith('@example.test'));
+
+  if (real.length) {
+    console.error('\nRefusing to run: this database holds real data.');
+    console.error(`Found ${real.length} non-fixture account(s): ${real.map(a => a.email).join(', ')}`);
+    console.error('These suites truncate every table. Point DATABASE_URL at a scratch database first.\n');
+    process.exit(1);
+  }
+}
+
+async function truncateAll(prisma) {
+  // FK-safe order: schedules reference contacts with RESTRICT.
+  await prisma.callHistory.deleteMany({});
+  await prisma.schedule.deleteMany({});
+  await prisma.message.deleteMany({});
+  await prisma.contact.deleteMany({});
+  await prisma.account.deleteMany({});
+}
+
+module.exports = { check, contains, section, summary, assertScratchDatabase, truncateAll };

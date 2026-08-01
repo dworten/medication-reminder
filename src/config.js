@@ -32,9 +32,16 @@ const config = {
   testPhone:      process.env.TEST_PHONE_NUMBER      || '',
 
   // Scheduling
-  timezone:    process.env.TIMEZONE     || 'America/Chicago',
-  morningCron: process.env.MORNING_CRON || '20 9 * * *',
-  eveningCron: process.env.EVENING_CRON || '20 21 * * *',
+  //
+  // MORNING_CRON / EVENING_CRON are gone: call times now live in the schedules
+  // table, each row carrying its own timezone and days-of-week. TIMEZONE below
+  // is only a default for new records and for formatting timestamps in alerts.
+  timezone: process.env.TIMEZONE || 'America/Chicago',
+
+  // How late a schedule may still fire. The old exact-minute cron silently
+  // missed a dose entirely if the container was restarting during that one
+  // minute; this turns that into a call a few minutes late instead.
+  scheduleGraceMinutes: parseInt(process.env.SCHEDULE_GRACE_MINUTES || '5', 10),
 
   // Database
   // Railway injects this from the Postgres service reference variable. Not yet
@@ -58,7 +65,13 @@ const config = {
   validateTwilioSignature: process.env.VALIDATE_TWILIO_SIGNATURE !== 'false',
   triggerSecret: process.env.TRIGGER_SECRET || '',
 
-  // Retry / flow settings
+  // Retry / flow settings.
+  //
+  // These are now FALLBACKS, not the source of truth. A call placed from a
+  // schedule uses that schedule's own max_attempts / retry_delay_minutes /
+  // max_reprompts. These values apply when there is no schedule behind the
+  // call (a manual /trigger), and when a webhook arrives without the settings
+  // encoded in its URL — an in-flight call from before a deploy, for instance.
   maxCallAttempts: parseInt(process.env.MAX_CALL_ATTEMPTS    || '3',  10),
   retryDelayMs:    parseInt(process.env.RETRY_DELAY_MINUTES  || '5',  10) * 60 * 1000,
   maxReprompts:    parseInt(process.env.MAX_REPROMPTS        || '3',  10),
@@ -68,6 +81,15 @@ const config = {
 // Returns a list of problems; empty means good to go.
 function validate() {
   const problems = [];
+
+  // The schedules now live in Postgres, so an unset DATABASE_URL means no call
+  // will ever fire. That is a deploy misconfiguration worth refusing to start
+  // over — unlike the database being temporarily *unreachable*, which the
+  // scheduler retries every minute and which must not stop the webhook routes
+  // from serving calls that are already in flight.
+  if (!config.databaseUrl) {
+    problems.push('DATABASE_URL is not set — schedules live in the database, so no calls could fire');
+  }
 
   if (config.mockMode) return problems;
 

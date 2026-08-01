@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node app.js",
     "dev": "node --watch app.js",
+    "test": "node test/run.js",
     "test:morning": "node app.js --test morning",
     "test:evening": "node app.js --test evening",
     "postinstall": "prisma generate",

@@ -1,67 +1,142 @@
 'use strict';
 
+// Database-driven scheduler.
+//
+// Replaces the two fixed MORNING_CRON / EVENING_CRON jobs with a single tick
+// every minute that asks the database what is due. Adding, moving or disabling
+// a call is now a row change that takes effect within a minute — no redeploy,
+// and eventually no shell at all once Phase 3's UI exists.
+//
+// The Sunday-morning skip that used to be an `if` in this file is now just
+// days_of_week on the row.
+//
+// Duplicate calls are the failure mode that matters here, so the ordering is
+// deliberate: evaluate → claim → call. The claim is a conditional UPDATE that
+// only one caller can win (see data/schedules.claimForFire).
+
 const cron   = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
+const db     = require('./db');
 
-let _tasks = [];
+const scheduleRepo  = require('./data/schedules');
+const scheduleMatch = require('./scheduleMatch');
 
-function weekdayInTimezone(date, timezone) {
-  return new Intl.DateTimeFormat('en-US', {
-    weekday: 'long',
-    timeZone: timezone,
-  }).format(date);
+const TICK_CRON = '* * * * *';
+
+let _task       = null;
+let _ticking    = false;
+let _warnedNoDb = false;
+
+// The claim window must exceed the grace window, or a catch-up tick would
+// re-fire a call that already went out. One extra minute covers a tick that
+// straddles the boundary.
+function claimWindowMs() {
+  return (config.scheduleGraceMinutes + 1) * 60 * 1000;
 }
 
-function shouldSkipDose(dose, date = new Date()) {
-  return dose === 'morning' && weekdayInTimezone(date, config.timezone) === 'Sunday';
+async function tick(now = new Date()) {
+  // Overlap guard. A tick that runs long (a slow Twilio call) must not have the
+  // next minute's tick start underneath it — the claim would still prevent a
+  // duplicate call, but this keeps the logs honest and the DB quiet.
+  if (_ticking) {
+    logger.warn('Scheduler tick still running, skipping this minute');
+    return;
+  }
+  _ticking = true;
+
+  try {
+    if (!db.isConfigured()) {
+      if (!_warnedNoDb) {
+        logger.error('Scheduler idle — DATABASE_URL is not set, so no schedules can be loaded');
+        _warnedNoDb = true;
+      }
+      return;
+    }
+
+    let schedules;
+    try {
+      schedules = await scheduleRepo.listEnabled();
+    } catch (err) {
+      // Transient database trouble. Log and wait for the next tick rather than
+      // crashing the process: the next minute may well succeed, and a crash
+      // would take the webhook routes down with it.
+      logger.error('Scheduler could not load schedules', { error: err.message });
+      return;
+    }
+
+    const due = scheduleMatch.findDue(schedules, now, config.scheduleGraceMinutes);
+    if (!due.length) return;
+
+    for (const { schedule, verdict } of due) {
+      try {
+        const claimed = await scheduleRepo.claimForFire(schedule.id, now, claimWindowMs());
+
+        if (!claimed) {
+          logger.info('Schedule already fired for this occurrence, skipping', {
+            scheduleId: schedule.id, name: schedule.name, localTime: verdict.localTime,
+          });
+          continue;
+        }
+
+        await _fire(schedule, verdict);
+      } catch (err) {
+        // One schedule failing must not stop the others — the evening call
+        // should still go out if the morning one blew up.
+        logger.error('Schedule failed to fire', {
+          scheduleId: schedule.id, name: schedule.name, error: err.message,
+        });
+      }
+    }
+  } finally {
+    _ticking = false;
+  }
+}
+
+async function _fire(schedule, verdict) {
+  const callManager = require('./callManager');
+
+  logger.info('Schedule fired', {
+    scheduleId:  schedule.id,
+    name:        schedule.name,
+    dose:        schedule.dose,
+    localTime:   verdict.localTime,
+    timezone:    schedule.timezone,
+    minutesLate: verdict.minutesLate,
+    contact:     schedule.contact ? schedule.contact.name : '(none)',
+  });
+
+  if (!schedule.contact) {
+    // The FK makes this impossible in practice; log loudly rather than throw a
+    // null-property error that would read as a code bug.
+    logger.error('Schedule has no contact — cannot place call', { scheduleId: schedule.id });
+    return;
+  }
+
+  await callManager.initiateCall(schedule.dose, 1, { schedule });
 }
 
 function start() {
-  const callManager = require('./callManager');
-
-  function trigger(dose) {
-    return async () => {
-      if (shouldSkipDose(dose)) {
-        logger.info(`Cron skipped: ${dose} call`, {
-          reason: 'Sunday morning Sunday school',
-          timezone: config.timezone,
-        });
-        return;
-      }
-
-      logger.info(`Cron fired: ${dose} call`, { timezone: config.timezone });
-      try {
-        await callManager.initiateCall(dose, 1);
-      } catch (err) {
-        logger.error(`${dose} call failed`, { error: err.message });
-      }
-    };
-  }
-
-  _tasks = [
-    cron.schedule(config.morningCron, trigger('morning'), { timezone: config.timezone }),
-    cron.schedule(config.eveningCron, trigger('evening'), { timezone: config.timezone }),
-  ];
+  _task = cron.schedule(TICK_CRON, () => {
+    tick().catch(err => logger.error('Scheduler tick threw', { error: err.message }));
+  }, { timezone: 'UTC' });
 
   logger.info('Scheduler running', {
-    morning:  config.morningCron,
-    evening:  config.eveningCron,
-    timezone: config.timezone,
-    sundayMorning: 'skipped',
+    tick:         TICK_CRON,
+    source:       'database',
+    graceMinutes: config.scheduleGraceMinutes,
   });
 }
 
-// Called on SIGTERM so a deploy doesn't fire a cron job mid-shutdown.
+// Called on SIGTERM so a deploy doesn't fire a call mid-shutdown.
 function stop() {
-  for (const task of _tasks) {
-    try {
-      task.stop();
-    } catch (err) {
-      logger.warn('Failed to stop cron task', { error: err.message });
-    }
+  if (!_task) return;
+  try {
+    _task.stop();
+  } catch (err) {
+    logger.warn('Failed to stop scheduler', { error: err.message });
   }
-  _tasks = [];
+  _task = null;
 }
 
-module.exports = { start, stop, shouldSkipDose, weekdayInTimezone };
+module.exports = { start, stop, tick };

@@ -4,6 +4,8 @@ Automated twice-daily phone calls reminding your grandmother to take her medicat
 
 Calls are placed at **9:20 AM and 9:20 PM US Central** by default (morning calls skipped on Sundays). If she doesn't answer, it retries up to 2 more times, 5 minutes apart. If she never confirms, it texts the caregiver an SMS alert.
 
+Call times, contacts, messages and escalation settings all live in **PostgreSQL** — edit them with `npm run db:studio` and the scheduler picks the change up within a minute, no redeploy.
+
 `MOCK_MODE=true` simulates every branch interactively in your terminal — no Twilio account needed to try it locally.
 
 ---
@@ -22,28 +24,58 @@ src/
   generated/prisma  Generated client — gitignored, rebuilt by `prisma generate`
   config.js         Env → config, resolves BASE_URL, validates at boot
   logger.js         Structured JSON to stdout (Railway captures it)
-  scheduler.js      node-cron fires at 9:20 AM / 9:20 PM (Central)
+  scheduler.js      Ticks every minute, fires whatever the DB says is due
+  scheduleMatch.js  Pure timezone/day matching — no DB, no clock, fully testable
   callManager.js    Routes to mock or real, owns retry + escalation logic
   twimlHandler.js   Express router: /webhook/initial /response /status
   security.js       Twilio signature validation + /trigger secret
   mockMode.js       Interactive terminal simulation (local only)
   smsAlert.js       Sends SMS via Twilio (or prints a box in mock mode)
+  data/             Database access, the seam Phase 3's API sits on
+    accounts.js     Account lookups
+    schedules.js    Schedule reads + the atomic fire-claim
+    callHistory.js  Per-attempt records (best-effort: never blocks a call)
 ```
 
 ### Call flow
 
 ```
-Cron fires
-  └─ initiateCall(dose, attempt=1)
-       ├─ MOCK: interactive terminal
-       └─ REAL: Twilio REST → grandma's phone
-                  ├─ She answers → /webhook/initial → Gather TwiML
-                  │    ├─ 1 / "yes"  → goodbye + hangup  ✅
-                  │    └─ 2 / "no"   → reprompt (up to 3×) → SMS if unconfirmed  ❌
-                  └─ No answer → /webhook/status → retry (×2, 5 min apart) → SMS  📲
+Scheduler tick (every minute)
+  └─ load enabled schedules → which are due in their own timezone + days?
+       └─ claim the schedule (atomic UPDATE — only one caller can win)
+            └─ initiateCall(dose, attempt=1, { schedule })
+                 ├─ opens a call_history row (PENDING)
+                 ├─ MOCK: interactive terminal
+                 └─ REAL: Twilio REST → the schedule's contact
+                            ├─ Answers → /webhook/initial → Gather TwiML
+                            │    ├─ 1 / "yes" → goodbye + hangup      ✅ CONFIRMED
+                            │    └─ 2 / "no"  → reprompt → SMS         ❌ NOT_CONFIRMED
+                            └─ No answer → /webhook/status → retry → SMS  📲 NO_ANSWER
 ```
 
-Calls are scheduled in `TIMEZONE` (default `America/Chicago`). node-cron resolves this against the IANA database, so it self-adjusts for Daylight Saving Time — the Railway container runs in UTC and that's fine.
+**Scheduling.** Each schedule row holds a wall-clock `time_of_day`, a set of
+`days_of_week`, and its own `timezone` — Android-clock semantics rather than a
+cron string, so a UI can render and edit it directly. The tick resolves each
+row's local time through the IANA database, so DST self-adjusts and the Railway
+container running in UTC is irrelevant.
+
+**No duplicate calls.** Before dialling, the tick stakes a claim with a single
+conditional `UPDATE ... WHERE last_fired_at IS NULL OR last_fired_at < window`.
+Postgres serialises that, so exactly one caller wins and every other sees zero
+rows updated. Replicas stay at 1, but this holds even if a second process ever
+appears. Claiming happens *before* the call, so a crash mid-dial cannot leave
+the schedule unclaimed and trigger a second call on the next tick.
+
+**Missed-minute grace.** The old exact-minute cron silently dropped a dose if
+the container happened to be restarting during that one minute. A schedule now
+stays due for `SCHEDULE_GRACE_MINUTES` (default 5), turning "missed entirely"
+into "a few minutes late".
+
+**Webhook compatibility.** `dose` and `attempt` remain in the webhook URLs
+exactly as before; `sched`, `ch` and `mr` are appended and every one is
+optional. A call already in flight during a deploy still completes on the new
+code, and an unreachable database degrades to the built-in prompt rather than
+failing the call.
 
 ---
 
