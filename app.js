@@ -107,9 +107,17 @@ if (testIdx !== -1) {
   assertMockModeIsRunnable();
   assertConfigIsValid();
 
-  const server = app.listen(config.port, () => {
+  // Bind 0.0.0.0 explicitly. Node's default (:: with IPv4 fallback) already
+  // accepts external connections, but Railway's edge connects over IPv4 and
+  // their docs call for 0.0.0.0 — being explicit removes it as a suspect.
+  const server = app.listen(config.port, '0.0.0.0', () => {
+    const addr = server.address();
     logger.info('Medication reminder started', {
       port:     config.port,
+      // Diagnostic: portFromEnv=false means Railway did not inject PORT and we
+      // fell back to 3000 — the public domain's target port must then be 3000.
+      portFromEnv: Boolean(process.env.PORT),
+      boundTo:  `${addr.address}:${addr.port}`,
       mode:     config.mockMode ? 'mock' : 'real',
       timezone: config.timezone,
       baseUrl:  config.baseUrl,

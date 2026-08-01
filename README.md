@@ -91,7 +91,12 @@ Railway detects Node from `package.json`, runs `npm ci`, and starts it with `npm
 ### Step 3 — Generate the public URL
 
 1. Click your service → **Settings** → **Networking** → **Public Networking**.
-2. Click **Generate Domain**. If prompted for a port, enter `3000`.
+2. Click **Generate Domain**. If prompted for a port, enter the port from the
+   `Medication reminder started` deploy log line — **not** automatically `3000`.
+   Railway injects `PORT` on most services, so the app often listens on
+   something else (commonly `8080`). If the domain's target port and the
+   listening port disagree, every request returns
+   `502 Application failed to respond` even though the deploy is healthy.
 3. You'll get something like `medication-reminder-production-a1b2.up.railway.app`.
 
 This is your permanent replacement for ngrok. **You do not need to copy it into a variable** — Railway exposes it to the app as `RAILWAY_PUBLIC_DOMAIN`, and `src/config.js` builds `BASE_URL` from it automatically. Only set `BASE_URL` by hand if you later add a custom domain.
