@@ -11,9 +11,14 @@
 // runs every minute, claims what is due, and does it. A restart mid-window
 // costs at most a minute of delay.
 //
-// Two kinds of work share the mechanism:
-//   REMINDER_CALL  + next_retry_at → place the next attempt
-//   ESCALATION_*   + next_retry_at → send the alert
+// Three kinds of work share the mechanism:
+//   REMINDER_CALL    + next_retry_at → place the next attempt
+//   ESCALATION_CALL  + next_retry_at → ring the fallback contact
+//   ESCALATION_SMS   + next_retry_at → text the fallback contact
+//
+// The last two are the Stage 4 chain. Each step is its own row, so the queue
+// needed no new machinery to carry it — an escalation call is just another due
+// item, and the SMS that follows it is another one behind that.
 //
 // Ordering is claim → do → complete. Completing (clearing next_retry_at) is
 // last on purpose: if the process dies mid-flight the item stays queued, so the
@@ -79,8 +84,19 @@ async function _sendEscalation(row) {
   await callManager.deliverEscalation(row);
 }
 
+async function _placeEscalationCall(row) {
+  const callManager = require('./callManager');
+
+  logger.call('Sweeper placing escalation call', {
+    callHistoryId: row.id, dose: row.dose,
+  });
+
+  await callManager.deliverEscalationCall(row);
+}
+
 async function _handle(row, now) {
-  if (row.kind === 'REMINDER_CALL') return _fireRetry(row, now);
+  if (row.kind === 'REMINDER_CALL')   return _fireRetry(row, now);
+  if (row.kind === 'ESCALATION_CALL') return _placeEscalationCall(row);
   return _sendEscalation(row);
 }
 

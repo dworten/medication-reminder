@@ -190,12 +190,13 @@ async function hasAttempt({ scheduleId, dose, attempt, since }) {
 //
 // `reason` rides in error_message — it is the row's "why", and giving it a
 // dedicated column would not earn its migration.
-async function enqueueEscalation({ accountId, scheduleId, contactId, dose, kind, reason, dueAt }) {
+async function enqueueEscalation({ accountId, scheduleId, contactId, dose, kind, reason, dueAt, parentId }) {
   return db.getClient().callHistory.create({
     data: {
       accountId,
       scheduleId:   scheduleId || null,
       contactId:    contactId  || null,
+      parentId:     parentId   || null,
       dose,
       kind,
       attempt:      1,
@@ -206,6 +207,90 @@ async function enqueueEscalation({ accountId, scheduleId, contactId, dose, kind,
   });
 }
 
+// ─── Escalation chain (Stage 4) ──────────────────────────────────────────────
+//
+// Each step is a row pointing at the step that caused it. That link is what
+// makes the chain auditable, and it doubles as the idempotency key: a step is
+// only queued if its parent does not already have one of that kind.
+
+// The guard against a repeated step. The sweeper's contract is "a crash leaves
+// work queued, so it may run twice" — without this, running the escalation-call
+// step twice would queue a second follow-up SMS each time.
+async function findChildByKind(parentId, kind) {
+  if (!parentId) return null;
+  return db.getClient().callHistory.findFirst({
+    where:   { parentId, kind },
+    orderBy: { startedAt: 'asc' },
+  });
+}
+
+// The whole chain from one row down, oldest first. Read-only — for `npm run
+// db:history` today and the Phase 3 API later.
+async function chainFrom(rootId) {
+  return _try('chainFrom', async (p) => {
+    const out  = [];
+    let   ids  = [rootId];
+
+    // Depth is 3 in practice (reminder → call → SMS); the bound is a guard
+    // against a cycle turning a bad row into an infinite loop.
+    for (let depth = 0; depth < 5 && ids.length; depth++) {
+      const rows = await p.callHistory.findMany({
+        where:   { parentId: { in: ids } },
+        include: { contact: true },
+        orderBy: { startedAt: 'asc' },
+      });
+      out.push(...rows);
+      ids = rows.map(r => r.id);
+    }
+    return out;
+  });
+}
+
+// Cancels queued work that is no longer wanted — the follow-up SMS after the
+// fallback contact acknowledges the call.
+//
+// Guarded on PENDING and unclaimed so it can never cancel something already in
+// flight: if the sweeper claimed the row a moment earlier, this reports false
+// and the text goes out. An extra "could not confirm" SMS seconds after
+// acknowledging is a far better outcome than a cancel racing a real alert.
+async function cancelWork(id, reason) {
+  if (!id) return false;
+  const result = await db.getClient().callHistory.updateMany({
+    where: { id, outcome: 'PENDING', retryClaimedAt: null },
+    data:  {
+      outcome:      'CANCELED',
+      nextRetryAt:  null,
+      completedAt:  new Date(),
+      errorMessage: reason,
+    },
+  });
+  return result.count === 1;
+}
+
+// Pulls queued work forward to now — the follow-up SMS when the escalation call
+// is answered by nobody, or answered without acknowledgment. Without this the
+// alert would still go out, just after the full ack window; this makes it
+// immediate when we already know the call failed.
+async function makeDueNow(id, now = new Date()) {
+  if (!id) return false;
+  const result = await db.getClient().callHistory.updateMany({
+    where: { id, outcome: 'PENDING', nextRetryAt: { not: null } },
+    data:  { nextRetryAt: now, retryClaimedAt: null },
+  });
+  return result.count === 1;
+}
+
+// Cheap re-read of a row's current state, for the narrow window between the
+// sweeper claiming a follow-up SMS and delivering it.
+async function currentOutcome(id) {
+  if (!id) return null;
+  const row = await db.getClient().callHistory.findUnique({
+    where:  { id },
+    select: { outcome: true },
+  });
+  return row ? row.outcome : null;
+}
+
 async function countPendingWork() {
   return db.getClient().callHistory.count({ where: { nextRetryAt: { not: null } } });
 }
@@ -214,4 +299,5 @@ module.exports = {
   startAttempt, attachCallSid, recordOutcome, closeIfPending, findById, recentForSchedule,
   scheduleRetry, findDueWork, claimWork, completeWork, releaseClaim, hasAttempt,
   enqueueEscalation, countPendingWork, SWEEP_INCLUDE,
+  findChildByKind, chainFrom, cancelWork, makeDueNow, currentOutcome,
 };

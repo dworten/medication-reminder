@@ -75,7 +75,9 @@ async function initiateCall(dose, attempt, options = {}) {
 
   if (config.mockMode) {
     const mock = require('./mockMode');
-    return mock.runMockCall(dose, attempt, { settings, to });
+    // The schedule rides along so the mock escalation chain branches the way the
+    // real one would, instead of always assuming the env defaults.
+    return mock.runMockCall(dose, attempt, { settings, to, schedule });
   }
 
   return _realCall(dose, attempt, { to, schedule, callHistoryId, settings });
@@ -235,45 +237,105 @@ async function handleNeverConfirmed(dose, attempt, ctx = {}) {
   await escalate(dose, 'answered but never confirmed medication taken', schedule, ctx);
 }
 
-// Queues an escalation rather than sending it inline.
+// ─── Escalation chain (Stage 4) ──────────────────────────────────────────────
 //
-// Sending inline meant a crash between "attempts exhausted" and "SMS sent" lost
-// the alert with nothing to recover it. Writing the row first makes the alert
-// durable; the sweeper is then kicked immediately, so in the normal case it
-// still goes out within a second rather than waiting for the next tick.
+// What used to be one hardcoded "text the caregiver" is now a chain configured
+// per schedule and recorded step by step in call_history:
 //
-// Stage 4 turns this into a configurable chain (fallback call, then SMS) driven
-// by the schedule's escalation columns. The queue mechanism is already the
-// right shape for it: each step becomes its own row.
+//   REMINDER_CALL (never confirmed)
+//     └─ ESCALATION_CALL   the fallback contact, asked to press 1
+//          └─ ESCALATION_SMS   queued at the same moment, due after the ack
+//                              window; cancelled if he presses 1, pulled
+//                              forward if the call goes unanswered
+//
+// escalate_with_call / escalate_with_sms decide which steps exist. Both off is
+// a misconfiguration; call-only skips the text; sms-only is the default and is
+// exactly what this app did before.
+
+// Resolves the chain from a schedule, falling back to env for escalations with
+// no schedule behind them (a manual /trigger).
+function escalationPlan(schedule) {
+  const contact = (schedule && schedule.escalationContact) || null;
+  const to      = (contact && contact.phone) || config.caregiverPhone || null;
+
+  const ackMinutes = (schedule && schedule.escalationAckMinutes) || config.escalationAckMinutes;
+
+  return {
+    contact,
+    to,
+    // A call step with nowhere to dial is not a step. Dropping it here rather
+    // than at delivery time means the chain starts at the SMS instead of
+    // queueing a call that can only fail.
+    withCall: Boolean(schedule ? schedule.escalateWithCall : config.escalateWithCall) && Boolean(to),
+    withSms:  Boolean(schedule ? schedule.escalateWithSms  : config.escalateWithSms),
+    ackMs:    ackMinutes * 60 * 1000,
+  };
+}
+
+// Starts the chain. Queues the first step rather than sending anything inline:
+// a crash between "attempts exhausted" and "SMS sent" used to lose the alert
+// with nothing to recover it. Writing the row first makes it durable; the
+// sweeper is kicked immediately, so in the normal case it still goes out within
+// a second rather than waiting for the next tick.
 async function escalate(dose, reason, schedule = null, ctx = {}) {
   const accountId = (schedule && schedule.accountId) || await _defaultAccountId();
+  const plan      = escalationPlan(schedule);
+
+  if (!plan.withCall && !plan.withSms) {
+    logger.error('NOBODY WILL BE ALERTED — this schedule escalates with neither a call nor an SMS', {
+      dose, reason, scheduleId: schedule ? schedule.id : null,
+    });
+    return;
+  }
 
   if (!accountId) {
     logger.error('Cannot queue escalation — no account; sending inline as a last resort', { dose, reason });
     return _sendEscalationInline(dose, reason, schedule);
   }
 
+  const kind     = plan.withCall ? 'ESCALATION_CALL' : 'ESCALATION_SMS';
+  const parentId = ctx.callHistoryId || null;
+
   try {
-    const row = await callHistoryRepo.enqueueEscalation({
-      accountId,
-      scheduleId: schedule ? schedule.id : (ctx.scheduleId || null),
-      contactId:  schedule && schedule.escalationContact ? schedule.escalationContact.id : null,
-      dose,
-      kind:   'ESCALATION_SMS',
-      reason,
-      dueAt:  new Date(),
-    });
+    // Twilio delivers a status callback more than once often enough to matter,
+    // and both handleNoAnswer and handleNeverConfirmed can land on the same
+    // reminder row. Without this guard that is two calls to the caregiver.
+    const existing = await callHistoryRepo.findChildByKind(parentId, kind);
+    if (existing) {
+      logger.warn('Escalation already queued for this attempt, not queueing again', {
+        callHistoryId: existing.id, parentId, kind, dose,
+      });
+      return;
+    }
 
-    logger.call('Escalation queued', { callHistoryId: row.id, dose, reason });
+    let row;
+    try {
+      row = await callHistoryRepo.enqueueEscalation({
+        accountId,
+        scheduleId: schedule ? schedule.id : (ctx.scheduleId || null),
+        contactId:  plan.contact ? plan.contact.id : null,
+        parentId,
+        dose,
+        kind,
+        reason,
+        dueAt:  new Date(),
+      });
+    } catch (err) {
+      // The check above is a read before a write; two callbacks arriving
+      // together can both pass it. The unique index catches what the check
+      // cannot, and losing that race means the step already exists — which is
+      // success, not failure. Falling through to the inline-send handler below
+      // would text the caregiver a second time.
+      if (_isDuplicateStep(err)) {
+        logger.warn('Escalation step already queued by a concurrent handler', { parentId, kind, dose });
+        return;
+      }
+      throw err;
+    }
 
-    // Kick the sweeper so the alert does not wait out the tick interval.
-    // Fire-and-forget: if this fails the next tick picks the row up anyway,
-    // which is the entire point of queueing it first.
-    setImmediate(() => {
-      require('./retrySweeper').runOnce().catch(err =>
-        logger.error('Immediate escalation sweep failed (the next tick will retry)', { error: err.message })
-      );
-    });
+    logger.call('Escalation queued', { callHistoryId: row.id, kind, dose, reason, parentId });
+
+    kickSweeper();
   } catch (err) {
     logger.error('Could not queue escalation, sending inline instead', { error: err.message, dose, reason });
 
@@ -294,9 +356,27 @@ async function escalate(dose, reason, schedule = null, ctx = {}) {
   }
 }
 
-function _escalationBody(dose, reason, timezone) {
+// Prisma's unique-constraint violation. The only unique constraint the
+// escalation path can hit is (parent_id, kind), i.e. "this step already exists".
+function _isDuplicateStep(err) {
+  return err && err.code === 'P2002';
+}
+
+// Runs a queued step without waiting out the tick interval. Fire-and-forget: if
+// it fails the next tick picks the row up anyway, which is the entire point of
+// queueing first.
+function kickSweeper() {
+  setImmediate(() => {
+    require('./retrySweeper').runOnce().catch(err =>
+      logger.error('Immediate escalation sweep failed (the next tick will retry)', { error: err.message })
+    );
+  });
+}
+
+function _escalationBody(dose, reason, timezone, extra = '') {
   const timeStr = new Date().toLocaleString('en-US', { timeZone: timezone || config.timezone });
-  return `MEDICATION ALERT: Could not confirm ${dose} dose taken as of ${timeStr}. (${reason})`;
+  const base    = `MEDICATION ALERT: Could not confirm ${dose} dose taken as of ${timeStr}. (${reason})`;
+  return extra ? `${base} ${extra}` : base;
 }
 
 // Last resort when the row could not be written at all. Not durable — but an
@@ -315,30 +395,58 @@ async function _sendEscalationInline(dose, reason, schedule) {
   await smsAlert.send(to, _escalationBody(dose, reason, schedule && schedule.timezone));
 }
 
-// Called by the sweeper for a queued escalation row. Throwing here is
+function _escalationDestination(row) {
+  const schedule = row.schedule || null;
+  return (row.contact && row.contact.phone)
+    || (schedule && schedule.escalationContact && schedule.escalationContact.phone)
+    || config.caregiverPhone;
+}
+
+// Unfixable by retrying — record it and let the sweeper close the item out
+// rather than looping on it every minute forever.
+async function _noDestination(row, what) {
+  await callHistoryRepo.recordOutcome(row.id, 'FAILED', {
+    errorMessage: `${row.errorMessage || ''} | no escalation destination configured`.trim(),
+  });
+  logger.error(`${what} has nowhere to go — set an escalation contact or CAREGIVER_PHONE_NUMBER`, {
+    callHistoryId: row.id, dose: row.dose,
+  });
+}
+
+// Called by the sweeper for a queued ESCALATION_SMS row. Throwing here is
 // meaningful: the sweeper releases the claim and tries again next minute.
 async function deliverEscalation(row) {
   const smsAlert = require('./smsAlert');
   const schedule = row.schedule || null;
 
-  const to = (row.contact && row.contact.phone)
-    || (schedule && schedule.escalationContact && schedule.escalationContact.phone)
-    || config.caregiverPhone;
-
-  if (!to) {
-    // Unfixable by retrying — record it and let the sweeper close the item out
-    // rather than looping on it forever.
-    await callHistoryRepo.recordOutcome(row.id, 'FAILED', {
-      errorMessage: `${row.errorMessage} | no escalation destination configured`,
-    });
-    logger.error('Escalation has nowhere to go — set an escalation contact or CAREGIVER_PHONE_NUMBER', {
-      callHistoryId: row.id, dose: row.dose,
+  // The narrow window where the fallback contact acknowledged the call between
+  // this row being claimed and being sent. Cancelling is guarded on "unclaimed",
+  // so the cancel loses that race by design — this is the cheap second look that
+  // stops the text anyway.
+  const current = await callHistoryRepo.currentOutcome(row.id);
+  if (current && current !== 'PENDING') {
+    logger.info('Escalation SMS no longer needed, skipping', {
+      callHistoryId: row.id, outcome: current,
     });
     return;
   }
 
-  const body = _escalationBody(row.dose, row.errorMessage || 'unconfirmed dose', schedule && schedule.timezone);
-  const sid  = await smsAlert.send(to, body);
+  const to = _escalationDestination(row);
+  if (!to) return _noDestination(row, 'Escalation SMS');
+
+  // Say so when a call was tried first, otherwise "we couldn't reach her" reads
+  // as the only thing that happened.
+  const afterCall = row.parentId
+    ? await callHistoryRepo.findById(row.parentId).catch(() => null)
+    : null;
+  const extra = afterCall && afterCall.kind === 'ESCALATION_CALL'
+    ? 'We also tried calling you and could not reach you.'
+    : '';
+
+  const body = _escalationBody(
+    row.dose, row.errorMessage || 'unconfirmed dose', schedule && schedule.timezone, extra
+  );
+  const sid = await smsAlert.send(to, body);
 
   await callHistoryRepo.recordOutcome(row.id, 'SENT');
   if (sid) await callHistoryRepo.attachCallSid(row.id, sid);
@@ -346,12 +454,166 @@ async function deliverEscalation(row) {
   logger.call('Escalation delivered', { callHistoryId: row.id, to, dose: row.dose });
 }
 
+// Called by the sweeper for a queued ESCALATION_CALL row: ring the fallback
+// contact and ask him to acknowledge.
+//
+// The follow-up SMS is queued BEFORE the call is placed, not after it fails.
+// Ordering it this way is what makes the chain survive a redeploy: once the row
+// exists, the alert goes out after the ack window no matter what happens to this
+// process. Acknowledging cancels it; a call nobody answers pulls it forward.
+async function deliverEscalationCall(row) {
+  const schedule = row.schedule || null;
+  const plan     = escalationPlan(schedule);
+  const to       = _escalationDestination(row);
+
+  if (!to) return _noDestination(row, 'Escalation call');
+
+  // The call went out on an earlier run that died before it could complete the
+  // work item. Re-dialling would ring the caregiver twice.
+  if (row.callSid) {
+    logger.warn('Escalation call already placed by an earlier run, skipping', {
+      callHistoryId: row.id, callSid: row.callSid,
+    });
+    return;
+  }
+
+  let followUp = null;
+  if (plan.withSms) {
+    followUp = await callHistoryRepo.findChildByKind(row.id, 'ESCALATION_SMS');
+    if (!followUp) {
+      try {
+        followUp = await callHistoryRepo.enqueueEscalation({
+          accountId:  row.accountId,
+          scheduleId: row.scheduleId,
+          contactId:  row.contactId,
+          parentId:   row.id,
+          dose:       row.dose,
+          kind:       'ESCALATION_SMS',
+          reason:     row.errorMessage || 'unconfirmed dose',
+          dueAt:      new Date(Date.now() + plan.ackMs),
+        });
+      } catch (err) {
+        if (!_isDuplicateStep(err)) throw err;
+        followUp = await callHistoryRepo.findChildByKind(row.id, 'ESCALATION_SMS');
+      }
+    }
+  }
+
+  logger.call('Placing escalation call', {
+    callHistoryId: row.id, to, dose: row.dose,
+    followUpSmsId: followUp ? followUp.id : null,
+    ackMinutes:    Math.round(plan.ackMs / 60000),
+  });
+
+  if (config.mockMode) {
+    logger.call('Mock: escalation call (no Twilio request made)', { to, dose: row.dose });
+    await callHistoryRepo.recordOutcome(row.id, 'NO_ANSWER');
+    if (followUp) await callHistoryRepo.makeDueNow(followUp.id);
+    return;
+  }
+
+  const recipient = schedule && schedule.contact ? schedule.contact.name : null;
+  const params    = new URLSearchParams();
+  params.set('dose', row.dose);
+  params.set('attempt', '1');
+  params.set('k', 'ESCALATION_CALL');
+  params.set('ch', row.id);
+  if (row.scheduleId) params.set('sched', row.scheduleId);
+  if (followUp)       params.set('fu', followUp.id);
+  if (recipient)      params.set('who', recipient);
+  // One re-ask inside the escalation call. This is an alert, not a conversation.
+  params.set('mr', '1');
+
+  const qs = params.toString();
+
+  // Called through module.exports so the test suite can intercept the outbound
+  // edge, the way it already intercepts smsAlert.send. Everything above this
+  // line — the queueing, the links, the idempotency — then runs for real.
+  const call = await module.exports.placeVoiceCall({
+    to,
+    from:                 config.twilioFromNumber,
+    url:                  `${config.baseUrl}/webhook/escalation?${qs}`,
+    statusCallback:       `${config.baseUrl}/webhook/status?${qs}`,
+    statusCallbackEvent:  ['initiated', 'ringing', 'answered', 'completed'],
+    statusCallbackMethod: 'POST',
+  });
+
+  await callHistoryRepo.attachCallSid(row.id, call.sid);
+  logger.call('Escalation call placed', { sid: call.sid, callHistoryId: row.id, to });
+}
+
+// The escalation call's outbound edge. Deliberately separate from _realCall,
+// which is the reminder path and is left exactly as it was.
+async function placeVoiceCall(params) {
+  return _twilioClient().calls.create(params);
+}
+
+// The fallback contact pressed 1. Close out the call step and cancel the text.
+// Awaited inside the live webhook rather than deferred: the SMS is due on a
+// clock, so cancelling it late means it has already gone out.
+async function acknowledgeEscalation(ctx = {}) {
+  try {
+    await callHistoryRepo.recordOutcome(ctx.callHistoryId, 'CONFIRMED');
+    const canceled = await callHistoryRepo.cancelWork(
+      ctx.followUpId, 'acknowledged on the escalation call'
+    );
+
+    logger.call('Escalation acknowledged', {
+      callHistoryId: ctx.callHistoryId, followUpSmsId: ctx.followUpId, canceled, dose: ctx.dose,
+    });
+    return canceled;
+  } catch (err) {
+    // The caller is on the line and the TwiML response must still go out. The
+    // consequence of failing here is a redundant SMS, not a missed alert.
+    logger.error('Could not record escalation acknowledgment', {
+      callHistoryId: ctx.callHistoryId, error: err.message,
+    });
+    return false;
+  }
+}
+
+// Twilio's status callback for an ESCALATION_CALL. The reminder path's retry
+// logic must not run here: an unanswered escalation call escalates onward to the
+// SMS, it does not redial the caregiver.
+async function handleEscalationCallEnded(dose, ctx = {}) {
+  if (ctx.outcome) {
+    await callHistoryRepo.recordOutcome(ctx.callHistoryId, ctx.outcome);
+  } else {
+    // Answered, then hung up without pressing 1 — voicemail, most likely.
+    // Guarded on PENDING so it cannot overwrite a CONFIRMED written moments ago
+    // by /webhook/escalation-response.
+    await callHistoryRepo.closeIfPending(ctx.callHistoryId, 'NOT_CONFIRMED');
+  }
+
+  const current = await callHistoryRepo.currentOutcome(ctx.callHistoryId);
+  if (current === 'CONFIRMED') {
+    logger.info('Escalation call was acknowledged, no SMS needed', { callHistoryId: ctx.callHistoryId });
+    return;
+  }
+
+  // Not acknowledged. The SMS would fire on its own once the ack window lapses;
+  // pulling it forward just means the alert lands now that we know the call
+  // failed, instead of some minutes later.
+  const pulled = await callHistoryRepo.makeDueNow(ctx.followUpId);
+
+  logger.call('Escalation call unacknowledged, sending the SMS now', {
+    callHistoryId: ctx.callHistoryId, followUpSmsId: ctx.followUpId, pulled, dose, outcome: current,
+  });
+
+  if (pulled) kickSweeper();
+}
+
 module.exports = {
   initiateCall,
   handleNoAnswer,
   handleNeverConfirmed,
+  handleEscalationCallEnded,
+  acknowledgeEscalation,
   escalate,
+  escalationPlan,
   deliverEscalation,
+  deliverEscalationCall,
+  placeVoiceCall,
   resolveSettings,
   loadScheduleContext,
 };

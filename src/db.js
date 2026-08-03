@@ -22,6 +22,30 @@ function isConfigured() {
   return Boolean(config.databaseUrl);
 }
 
+// `?schema=` in DATABASE_URL is a Prisma-engine parameter. The CLI honours it,
+// so `prisma migrate deploy` creates the tables there — but the driver adapter
+// is plain node-postgres, which ignores it entirely and uses the default
+// search_path. The result is migrations landing in one schema while the running
+// app reads another, and the app looks like it simply has no schedules.
+//
+// Nothing here sets it today; this exists so that if it ever appears, it says so
+// rather than presenting as an empty database.
+function _warnOnSchemaParam() {
+  let schema;
+  try {
+    schema = new URL(config.databaseUrl).searchParams.get('schema');
+  } catch {
+    return; // not a parseable URL; the driver will complain about that itself
+  }
+
+  if (schema && schema !== 'public') {
+    logger.warn('DATABASE_URL sets ?schema= — migrations will use it but the app will not', {
+      schema,
+      effect: 'the app reads the connection\'s default search_path, normally "public"',
+    });
+  }
+}
+
 // Builds the client on first call. Throws if DATABASE_URL is unset — callers
 // that can run without a database should check isConfigured() first.
 function getClient() {
@@ -33,6 +57,8 @@ function getClient() {
 
   const { PrismaClient } = require('./generated/prisma');
   const { PrismaPg }     = require('@prisma/adapter-pg');
+
+  _warnOnSchemaParam();
 
   // Prisma 7 connects through a driver adapter rather than its own engine, so
   // the pool is plain node-postgres and its settings are ours to tune.

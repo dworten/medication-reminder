@@ -125,7 +125,7 @@ async function _handleResponse(dose, attempt, input, repromptCount, opts = {}) {
     voice("I wasn't able to confirm that you've taken your medicine. Please take it as soon as possible. Goodbye.");
     console.log('\n  ❌  Max reprompts reached without confirmation.\n');
     logger.call('Mock: max reprompts reached', { dose, attempt, repromptCount });
-    await _sendEscalationSms(dose, 'answered but never confirmed medication taken');
+    await _runEscalation(dose, 'answered but never confirmed medication taken', opts);
     return;
   }
 
@@ -157,16 +157,77 @@ async function _handleNoAnswer(dose, attempt, opts = {}) {
   } else {
     console.log(`\n  📵  All ${maxAttempts} attempts exhausted.\n`);
     logger.call('Mock: all attempts exhausted', { dose });
-    await _sendEscalationSms(dose, `no answer after all ${maxAttempts} attempts`);
+    await _runEscalation(dose, `no answer after all ${maxAttempts} attempts`, opts);
   }
 }
 
-async function _sendEscalationSms(dose, reason) {
+// Walks the Stage 4 escalation chain in the terminal.
+//
+// Mock mode never touches the database — the point of it is to try the flow with
+// no Twilio account and no Postgres — so this mirrors the chain rather than
+// running it. What it does read is the schedule that fired the call, so the
+// branch you see locally is the branch your real configuration would take.
+async function _runEscalation(dose, reason, opts = {}) {
+  const schedule = opts.schedule || null;
+
+  const withCall = schedule ? schedule.escalateWithCall : config.escalateWithCall;
+  const withSms  = schedule ? schedule.escalateWithSms  : config.escalateWithSms;
+
+  const fallback = (schedule && schedule.escalationContact) || null;
+  const to = (fallback && fallback.phone)
+    || config.caregiverPhone
+    || '(CAREGIVER_PHONE_NUMBER not set in .env)';
+
+  if (!withCall && !withSms) {
+    console.log('\n  ⚠️   This schedule escalates with neither a call nor an SMS — nobody would be alerted.\n');
+    logger.error('Mock: no escalation step enabled', { dose, reason });
+    return;
+  }
+
+  let acknowledged = false;
+
+  if (withCall) {
+    const ackMinutes = (schedule && schedule.escalationAckMinutes) || config.escalationAckMinutes;
+
+    console.log(`\n${HR}`);
+    console.log(`  MOCK ESCALATION CALL  |  Dose: ${dose.toUpperCase()}`);
+    console.log(`  Calling fallback:     ${to}${fallback ? `  (${fallback.name})` : ''}`);
+    console.log(HR);
+    if (withSms) {
+      console.log(`  In live mode the follow-up SMS is already queued, due in ${ackMinutes} min`);
+      console.log('  unless this call is acknowledged.\n');
+    }
+    console.log('    1 or yes       → acknowledges the alert');
+    console.log('    [Enter] or "no answer" → no pickup / voicemail\n');
+
+    const raw = (await ask('  > ')).toLowerCase();
+
+    if (['1', 'yes', 'y', 'yep', 'yeah', 'yup'].includes(raw)) {
+      voice('Thank you. This alert has been acknowledged. Goodbye.');
+      acknowledged = true;
+      logger.call('Mock: escalation acknowledged', { dose });
+    } else {
+      const who = (schedule && schedule.contact && schedule.contact.name) || 'The medication recipient';
+      voice(`This is an automated medication alert. ${who} did not confirm taking the ${dose} medication. Press 1 to acknowledge this alert.`);
+      info('Not acknowledged.');
+      logger.call('Mock: escalation call unacknowledged', { dose });
+    }
+  }
+
+  if (acknowledged) {
+    console.log('\n  ✅  Acknowledged on the call — the follow-up SMS is cancelled.\n');
+    return;
+  }
+
+  if (!withSms) {
+    console.log('\n  ⚠️   No SMS step configured, so the chain ends here unacknowledged.\n');
+    return;
+  }
+
   const smsAlert = require('./smsAlert');
-  const timeStr  = new Date().toLocaleString('en-US', { timeZone: config.timezone });
-  const to       = config.caregiverPhone || '(CAREGIVER_PHONE_NUMBER not set in .env)';
-  const body     = `MEDICATION ALERT: Could not confirm ${dose} dose taken as of ${timeStr}. (${reason})`;
-  await smsAlert.send(to, body);
+  const timeStr  = new Date().toLocaleString('en-US', { timeZone: (schedule && schedule.timezone) || config.timezone });
+  const extra    = withCall ? ' We also tried calling you and could not reach you.' : '';
+  await smsAlert.send(to, `MEDICATION ALERT: Could not confirm ${dose} dose taken as of ${timeStr}. (${reason})${extra}`);
 }
 
 module.exports = { runMockCall };

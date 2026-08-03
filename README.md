@@ -2,9 +2,9 @@
 
 Automated twice-daily phone calls reminding your grandmother to take her medication, built with Node.js + Twilio Programmable Voice, deployed on Railway.
 
-Calls are placed at **9:20 AM and 9:20 PM US Central** by default (morning calls skipped on Sundays). If she doesn't answer, it retries up to 2 more times, 5 minutes apart. If she never confirms, it texts the caregiver an SMS alert.
+Calls are placed at **9:20 AM and 9:20 PM US Central** by default (morning calls skipped on Sundays). If she doesn't answer, it retries up to 2 more times, 5 minutes apart. If she never confirms, it escalates to a caregiver — a text, or a call then a text, depending on how the schedule is configured.
 
-Call times, contacts, messages and escalation settings all live in **PostgreSQL** — edit them with `npm run db:studio` and the scheduler picks the change up within a minute, no redeploy.
+Call times, contacts, messages and escalation settings all live in **PostgreSQL** — edit them with `npm run db:studio` and the scheduler picks the change up within a minute, no redeploy. `npm run db:seed` creates a working setup from scratch; `npm run db:history` shows what actually happened.
 
 `MOCK_MODE=true` simulates every branch interactively in your terminal — no Twilio account needed to try it locally.
 
@@ -19,6 +19,9 @@ prisma.config.js    Prisma CLI config — connection URL + .env loading (Prisma 
 prisma/
   schema.prisma     Data model: accounts, contacts, messages, schedules, call_history
   migrations/       Version-controlled SQL, applied with `prisma migrate deploy`
+  seed.js           Creates the account, contacts, message and schedules (idempotent)
+scripts/
+  history.js        `npm run db:history` — recent attempts, escalation chains indented
 src/
   db.js             Shared PrismaClient (lazy; the app boots without a database)
   generated/prisma  Generated client — gitignored, rebuilt by `prisma generate`
@@ -28,7 +31,7 @@ src/
   scheduleMatch.js  Pure timezone/day matching — no DB, no clock, fully testable
   retrySweeper.js   Ticks every minute, does the retries/escalations the DB owes
   callManager.js    Routes to mock or real, owns retry + escalation logic
-  twimlHandler.js   Express router: /webhook/initial /response /status
+  twimlHandler.js   Express router: /webhook/initial /response /status /escalation
   security.js       Twilio signature validation + /trigger secret
   mockMode.js       Interactive terminal simulation (local only)
   smsAlert.js       Sends SMS via Twilio (or prints a box in mock mode)
@@ -50,9 +53,48 @@ Scheduler tick (every minute)
                  └─ REAL: Twilio REST → the schedule's contact
                             ├─ Answers → /webhook/initial → Gather TwiML
                             │    ├─ 1 / "yes" → goodbye + hangup      ✅ CONFIRMED
-                            │    └─ 2 / "no"  → reprompt → SMS         ❌ NOT_CONFIRMED
-                            └─ No answer → /webhook/status → retry → SMS  📲 NO_ANSWER
+                            │    └─ 2 / "no"  → reprompt → escalate    ❌ NOT_CONFIRMED
+                            └─ No answer → /webhook/status → retry → escalate 📲 NO_ANSWER
 ```
+
+### Escalation chain
+
+When a dose can't be confirmed, the chain is whatever the schedule's
+`escalate_with_call` / `escalate_with_sms` columns say, and every step is its own
+`call_history` row linked to the one that caused it:
+
+```
+REMINDER_CALL  (never confirmed after max_attempts)
+  │
+  ├─ escalate_with_call = false   ── the default, and what this app always did
+  │    └─ ESCALATION_SMS → the fallback contact                     📲
+  │
+  └─ escalate_with_call = true
+       └─ ESCALATION_CALL → the fallback contact, "press 1 to acknowledge"
+            ├─ pressed 1  → chain ends                             ✅ CONFIRMED
+            └─ no answer, voicemail, or no keypress
+                 └─ ESCALATION_SMS                                  📲 SENT
+```
+
+**The text is queued before the call is dialled, not after it fails.** It sits in
+the queue due `escalation_ack_minutes` out; pressing 1 cancels it, and a call
+that goes unanswered pulls it forward so it lands immediately. Ordering it this
+way is what makes the chain survive a crash — once the row exists, the caregiver
+is alerted no matter what happens to the process that placed the call. The
+alternative, sending the SMS in the callback after the call fails, loses the
+alert entirely if that callback never arrives.
+
+**Alerted exactly once.** `(parent_id, kind)` is UNIQUE, so a duplicate Twilio
+status callback — which does happen — cannot produce a second call or a second
+text. Checking for an existing step before inserting is a read followed by a
+write and two callbacks arriving together can both pass it; Postgres cannot be
+raced. An escalation call that is re-swept after a crash is skipped on its
+`call_sid`, and an SMS row already marked `SENT` is re-checked before sending.
+
+Both steps off means nobody is alerted; the app logs that loudly rather than
+failing silently.
+
+`npm run db:history` renders these chains, indented, with what is still queued.
 
 **Scheduling.** Each schedule row holds a wall-clock `time_of_day`, a set of
 `days_of_week`, and its own `timezone` — Android-clock semantics rather than a
@@ -177,7 +219,11 @@ Service → **Variables** tab → **New Variable** for each (or use **Raw Editor
 | `TRIGGER_SECRET` | a long random string | Generate: `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"` |
 | `NODE_ENV` | `production` | Switches logging to JSON |
 
-Optional overrides (defaults in parentheses): `MAX_CALL_ATTEMPTS` (3), `RETRY_DELAY_MINUTES` (5), `MAX_REPROMPTS` (3), `MORNING_CRON` (`20 9 * * *`), `EVENING_CRON` (`20 21 * * *`).
+`MORNING_CRON` and `EVENING_CRON` are **gone** — call times live in the `schedules` table now. If they are still set on your Railway service, delete them; nothing reads them and leaving them there suggests they still control something.
+
+You also need `DATABASE_URL`, added in Step 3b below.
+
+Optional overrides (defaults in parentheses): `MAX_CALL_ATTEMPTS` (3), `RETRY_DELAY_MINUTES` (5), `MAX_REPROMPTS` (3), `SCHEDULE_GRACE_MINUTES` (5), `RETRY_STALE_CLAIM_MINUTES` (10), `RETRY_GIVE_UP_HOURS` (6), `ESCALATE_WITH_CALL` (false), `ESCALATE_WITH_SMS` (true), `ESCALATION_ACK_MINUTES` (3). The last three, like the retry settings, are only fallbacks for an escalation with no schedule behind it — each schedule carries its own columns.
 
 **Do not set `PORT`** — Railway assigns it and the app reads `process.env.PORT`.
 
@@ -273,18 +319,36 @@ Once deployed, the app sits at a stable public URL, so both entry points are loc
 | `GRANDMA_PHONE_NUMBER` | — | Her number, E.164 |
 | `CAREGIVER_PHONE_NUMBER` | — | Your number for SMS alerts, E.164 |
 | `TEST_PHONE_NUMBER` | — | Optional target for `/trigger?target=test` |
-| `TIMEZONE` | `America/Chicago` | IANA timezone — calls follow this clock |
-| `MORNING_CRON` | `20 9 * * *` | Cron expression for 9:20 AM |
-| `EVENING_CRON` | `20 21 * * *` | Cron expression for 9:20 PM |
+| `TIMEZONE` | `America/Chicago` | Default for new records and alert timestamps. Each schedule row carries its own |
+| `DATABASE_URL` | — | Postgres connection. On Railway, add it as a **reference** to the Postgres service, not a pasted copy |
 | `PORT` | `3000` | Assigned by Railway; don't set it there |
 | `BASE_URL` | auto | Public URL for webhooks. Derived from `RAILWAY_PUBLIC_DOMAIN` when unset |
 | `MOCK_MODE` | `true` | `true` = terminal simulation, `false` = real Twilio |
 | `TRIGGER_SECRET` | — | Shared secret for `POST /trigger` |
 | `VALIDATE_TWILIO_SIGNATURE` | `true` | Verify webhook signatures |
 | `NODE_ENV` | `development` | `production` switches logs to JSON |
+| `SCHEDULE_GRACE_MINUTES` | `5` | How late a schedule may still fire after its minute |
+| `RETRY_STALE_CLAIM_MINUTES` | `10` | How long a sweeper's claim on queued work stays valid |
+| `RETRY_GIVE_UP_HOURS` | `6` | Queued work older than this is abandoned |
+
+These five are **fallbacks only**. A call placed from a schedule uses that schedule's own columns; these apply to a manual `/trigger` with nothing seeded, and to a webhook arriving without context (a call in flight across a deploy).
+
+| Variable | Default | Description |
+|---|---|---|
 | `MAX_CALL_ATTEMPTS` | `3` | Total call attempts (1 initial + 2 retries) |
 | `RETRY_DELAY_MINUTES` | `5` | Minutes between retries after no answer |
 | `MAX_REPROMPTS` | `3` | Max re-asks within a single answered call |
+| `ESCALATE_WITH_CALL` | `false` | Call the fallback contact before texting them |
+| `ESCALATE_WITH_SMS` | `true` | Text the fallback contact |
+| `ESCALATION_ACK_MINUTES` | `3` | Grace period to press 1 on the escalation call before the text goes out |
+
+Seed-only, read by `prisma/seed.js` and never by the running app:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SEED_ACCOUNT_EMAIL` | — | The account the seed creates |
+| `SEED_RECIPIENT_NAME` | `Grandma` | Contact name for `GRANDMA_PHONE_NUMBER` |
+| `SEED_CAREGIVER_NAME` | `Caregiver` | Contact name for `CAREGIVER_PHONE_NUMBER` |
 
 ---
 
@@ -303,8 +367,71 @@ Locally, logs are human-readable instead; set `LOG_FORMAT=json` to see productio
 
 ---
 
-## Known limitations (addressed in phase 2)
+## Seeding and verifying
 
-- **Schedules are cron strings in env vars**, and the Sunday-morning skip is hardcoded in `scheduler.js`. Moving to database-backed schedules with a days-of-week column.
-- **Pending retries live in memory** (`setTimeout` in `callManager.js`). A redeploy inside the 5-minute retry window silently drops that retry and the missed-dose SMS that would follow. Moving to a `next_retry_at` column with a sweeper.
-- **Call history is only in logs**, which are retention-limited. Moving to a `call_history` table.
+```bash
+npm run db:seed              # create anything missing, touch nothing existing
+npm run db:seed -- --force   # also overwrite settings on rows that already exist
+```
+
+The seed reproduces exactly what the environment variables used to configure: your account, your grandmother as the recipient contact, you as the caregiver, a default TTS message whose wording is character-for-character what the app already speaks, and the two schedules.
+
+It reads phone numbers from `GRANDMA_PHONE_NUMBER` / `CAREGIVER_PHONE_NUMBER`, so nothing personal lives in the repo, and it refuses to run if either is missing or not in E.164 format — a schedule with no reachable number looks configured and never calls anyone.
+
+Re-running it is safe. The default is deliberately additive: once you've edited a schedule in Prisma Studio, a redeploy that re-runs the seed must not quietly put your changes back. `--force` is how you say you meant it, and even then `enabled` and `last_fired_at` are left alone — one is a deliberate on/off switch, the other is the double-call guard.
+
+**The Sunday-morning gap is data now, not code.** The seed writes morning as `days_of_week = [1,2,3,4,5,6]` because the 9:20 AM call was interrupting her Sunday School class. That used to be a hardcoded special case in `scheduler.js`; it now lives in the column, which is the only place it can be changed. Evening is every day.
+
+### Verifying end to end
+
+```bash
+# 1. Place a call that pulls contact, message and escalation settings from the DB
+curl -X POST "https://YOUR-APP.up.railway.app/trigger?dose=morning&target=test" \
+  -H "X-Trigger-Secret: YOUR_TRIGGER_SECRET"
+```
+
+The response tells you where the configuration came from — `"source": "database"` means the schedule was found, `"env fallback"` means nothing is seeded yet:
+
+```json
+{ "ok": true, "dose": "morning", "target": "test", "mode": "real",
+  "source": "database",
+  "schedule": { "id": "…", "name": "Morning meds", "contact": "Grandma" } }
+```
+
+```bash
+# 2. See the attempt it recorded
+npm run db:history            # last 20 attempts, escalation chains indented
+npm run db:history -- 50      # last 50
+npm run db:history -- --queue # only what the sweeper still owes
+```
+
+```
+ok  Aug 02, 21:07  CALL      morning  try 1  CONFIRMED      Grandma +1512…
+                     1 reprompts  |  CA…
+XX  Aug 02, 23:42  CALL      evening  try 3  NO_ANSWER      Grandma +1512…
+     └─ XX  Aug 02, 23:43  ESC CALL  evening  try 1  NO_ANSWER   Caregiver +1512…
+              CA…  |  "no answer after all 3 attempts"
+          └─ ok  Aug 02, 23:44  ESC SMS   evening  try 1  SENT   Caregiver +1512…
+```
+
+`npm run db:studio` opens the same data for editing.
+
+---
+
+## Tests
+
+```bash
+npm test
+```
+
+Five suites. `scheduleMatch` is pure and needs nothing; the other four read and write a real database and **truncate every table between cases**.
+
+They refuse to run the moment they see an account whose email is not a `@example.test` fixture — so once you have seeded your real account, `DATABASE_URL` must point at a **scratch database** before `npm test` will do anything. Create a second Postgres service in Railway (or run one locally) and use its URL for testing. Note that `?schema=` in the URL is not enough to isolate them: the Prisma CLI honours it, but the running client connects through a plain node-postgres adapter that ignores it, so migrations would land in one schema while the app read another. It needs to be a different database.
+
+---
+
+## Known limitations (Phase 3)
+
+- **No API and no UI.** Data is managed with `prisma/seed.js` and Prisma Studio. `src/data/` is the seam an HTTP layer sits on: every query the call path needs is already there, account-scoped, with relations loaded in one round trip.
+- **No auth.** The schema is multi-tenant — every table carries `account_id` — but there is one account and nothing checks who is asking.
+- **`escalate_with_call` is off by default,** so the fallback-call step ships unused until you turn it on for a schedule. The path is covered by tests, but it has not rung a real phone.

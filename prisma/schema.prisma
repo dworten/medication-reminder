@@ -170,6 +170,11 @@ model Schedule {
   escalateWithCall    Boolean @default(false) @map("escalate_with_call")
   escalateWithSms     Boolean @default(true) @map("escalate_with_sms")
 
+  // How long the fallback contact has to acknowledge the escalation CALL before
+  // the follow-up SMS goes out anyway. Both steps enabled means "call him, and
+  // text him too unless he picks up and presses 1".
+  escalationAckMinutes Int @default(3) @map("escalation_ack_minutes")
+
   // Set by the scheduler after a successful fire, so a restart inside the same
   // minute cannot fire the same schedule twice.
   lastFiredAt DateTime? @map("last_fired_at")
@@ -222,6 +227,23 @@ model CallHistory {
 
   errorMessage String? @map("error_message")
 
+  // ── Escalation chain (Stage 4) ──
+  // Points at the step that caused this one: an ESCALATION_SMS points at the
+  // ESCALATION_CALL that went unacknowledged, which points at the REMINDER_CALL
+  // that was never confirmed. The whole chain is then one query rather than
+  // something inferred from timestamps, which is what makes "why did I get this
+  // text?" answerable — and what the Phase 3 API will render.
+  //
+  // It is also the idempotency key: before queueing a step, the chain is asked
+  // whether that child already exists, so a re-run cannot double-call.
+  //
+  // (parent_id, kind) is UNIQUE, which is what actually enforces "the caregiver
+  // is alerted once". Checking for an existing child before inserting is a read
+  // followed by a write, and two duplicate Twilio status callbacks arriving
+  // milliseconds apart can both pass that check. Postgres cannot be raced.
+  // Many NULL parent_ids coexist, since NULLs are distinct in a unique index.
+  parentId String? @map("parent_id") @db.Uuid
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -229,6 +251,12 @@ model CallHistory {
   schedule Schedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
   contact  Contact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
 
+  // SetNull, not Cascade: pruning an old reminder row must not delete the record
+  // that a caregiver was alerted.
+  parent   CallHistory?  @relation("EscalationChain", fields: [parentId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  children CallHistory[] @relation("EscalationChain")
+
+  @@unique([parentId, kind])
   @@index([accountId, startedAt])
   @@index([scheduleId, startedAt])
   @@index([nextRetryAt])

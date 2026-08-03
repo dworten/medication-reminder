@@ -88,6 +88,16 @@ const config = {
   // is not a reminder, it is a confusing phone call at the wrong time of day —
   // and without a ceiling a permanently failing item would be retried forever.
   retryGiveUpHours: parseInt(process.env.RETRY_GIVE_UP_HOURS || '6', 10),
+
+  // Escalation chain fallbacks.
+  //
+  // Like the retry settings above, these apply only when no schedule sits behind
+  // the escalation. A schedule's own escalate_with_call / escalate_with_sms /
+  // escalation_ack_minutes always win. The defaults reproduce the behaviour this
+  // app has always had: text the caregiver, don't call him.
+  escalateWithCall:     process.env.ESCALATE_WITH_CALL === 'true',
+  escalateWithSms:      process.env.ESCALATE_WITH_SMS !== 'false',
+  escalationAckMinutes: parseInt(process.env.ESCALATION_ACK_MINUTES || '3', 10),
 };
 
 // Fail loudly at boot rather than at 9:20 PM when a call silently can't be placed.

@@ -70,6 +70,12 @@ function readContext(req) {
     scheduleId:   req.query.sched || null,
     callHistoryId: req.query.ch || null,
     maxReprompts: parseInt(req.query.mr || String(config.maxReprompts), 10),
+
+    // Stage 4 escalation chain. Absent on every reminder call, which is what
+    // makes `kind` default to REMINDER_CALL and leaves that path untouched.
+    kind:       req.query.k   || 'REMINDER_CALL',
+    followUpId: req.query.fu  || null,
+    recipient:  req.query.who || null,
   };
 }
 
@@ -81,6 +87,11 @@ function contextQuery(ctx, extra = {}) {
   if (ctx.scheduleId)    params.set('sched', ctx.scheduleId);
   if (ctx.callHistoryId) params.set('ch', ctx.callHistoryId);
   params.set('mr', String(ctx.maxReprompts));
+  // Only emitted when set, so a reminder call's URLs are byte-for-byte what
+  // they were before Stage 4.
+  if (ctx.kind && ctx.kind !== 'REMINDER_CALL') params.set('k', ctx.kind);
+  if (ctx.followUpId) params.set('fu',  ctx.followUpId);
+  if (ctx.recipient)  params.set('who', ctx.recipient);
   for (const [k, v] of Object.entries(extra)) params.set(k, String(v));
   return params.toString();
 }
@@ -127,7 +138,9 @@ function sayOpts(body) {
 }
 
 // body is { say } or { play }; the question is always spoken after it.
-function gatherTwiml(body, actionUrl) {
+// `question` defaults to the medication prompt — the escalation call passes its
+// own, since "press 1 to acknowledge" is a different ask entirely.
+function gatherTwiml(body, actionUrl, question = MSG_QUESTION) {
   const r = new VoiceResponse();
   const g = r.gather({
     input:         'dtmf speech',
@@ -140,9 +153,9 @@ function gatherTwiml(body, actionUrl) {
 
   if (body.play) {
     g.play(body.play);
-    g.say(MSG_QUESTION);
+    g.say(question);
   } else {
-    g.say(sayOpts(body), `${body.say} ${MSG_QUESTION}`);
+    g.say(sayOpts(body), `${body.say} ${question}`);
   }
 
   // Fallback when Gather times out with no input — treat as a non-answer
@@ -216,8 +229,87 @@ router.post('/response', async (req, res) => {
   res.type('text/xml').send(r.toString());
 });
 
+// ─── Escalation call (Stage 4) ───────────────────────────────────────────────
+//
+// Deliberately its own pair of routes rather than a branch inside /initial and
+// /response. This call has a different audience, a different script and a
+// different meaning for "yes", and the reminder path is the part of this app
+// that must not break — so it is left alone entirely.
+
+const ESC_QUESTION = 'Press 1 to acknowledge this alert.';
+const ESC_ACK      = 'Thank you. This alert has been acknowledged. Goodbye.';
+const ESC_UNACK    = 'No acknowledgment received. A text message will be sent instead. Goodbye.';
+
+function escalationMessage(ctx) {
+  const who  = ctx.recipient ? `${ctx.recipient}` : 'The medication recipient';
+  const when = ctx.dose === 'morning' ? 'morning' : 'evening';
+  return `This is an automated medication alert. ${who} did not confirm taking the ${when} medication.`;
+}
+
+// Called by Twilio when the fallback contact answers
+// POST /webhook/escalation?dose=&ch=&fu=&who=&k=ESCALATION_CALL
+router.post('/escalation', (req, res) => {
+  const ctx = readContext(req);
+  logger.call('webhook /escalation', {
+    dose: ctx.dose, callHistoryId: ctx.callHistoryId, followUpSmsId: ctx.followUpId,
+  });
+
+  // No database read at all on this path: everything the message needs already
+  // rode in on the query string, and an alert call is the last place to add a
+  // round trip that can time out.
+  const action = `/webhook/escalation-response?${contextQuery(ctx, { reprompts: 0 })}`;
+  res.type('text/xml').send(
+    gatherTwiml({ say: escalationMessage(ctx) }, action, ESC_QUESTION)
+  );
+});
+
+// POST /webhook/escalation-response?...&reprompts=0[&noInput=1]
+router.post('/escalation-response', async (req, res) => {
+  const ctx       = readContext(req);
+  const reprompts = parseInt(req.query.reprompts || '0', 10);
+
+  const digits   = (req.body.Digits || '').trim();
+  const speech   = (req.body.SpeechResult || '').toLowerCase().trim();
+  const response = classifyResponse(digits, speech);
+
+  logger.call('webhook /escalation-response', {
+    dose: ctx.dose, reprompts, digits, speech, response, callHistoryId: ctx.callHistoryId,
+  });
+
+  const r = new VoiceResponse();
+  const callManager = require('./callManager');
+
+  if (response === 'yes') {
+    // Awaited, unlike the reminder path's fire-and-forget confirm: the follow-up
+    // SMS is due on a clock, and cancelling it after the response has gone out
+    // means racing the sweeper for it.
+    await callManager.acknowledgeEscalation({
+      callHistoryId: ctx.callHistoryId,
+      followUpId:    ctx.followUpId,
+      dose:          ctx.dose,
+    });
+    r.say(ESC_ACK);
+    r.hangup();
+
+  } else if (reprompts >= ctx.maxReprompts) {
+    // Nothing to do here: the SMS is already queued and the status callback
+    // pulls it forward when the call ends. Saying so is only courtesy.
+    r.say(ESC_UNACK);
+    r.hangup();
+
+  } else {
+    const action = `/webhook/escalation-response?${contextQuery(ctx, { reprompts: reprompts + 1 })}`;
+    res.type('text/xml').send(
+      gatherTwiml({ say: escalationMessage(ctx) }, action, ESC_QUESTION)
+    );
+    return;
+  }
+
+  res.type('text/xml').send(r.toString());
+});
+
 // Called by Twilio for call status updates (no-answer, busy, failed, completed)
-// POST /webhook/status?dose=morning&attempt=1[&sched=&ch=&mr=]
+// POST /webhook/status?dose=morning&attempt=1[&sched=&ch=&mr=&k=&fu=]
 router.post('/status', async (req, res) => {
   const status = req.body.CallStatus || '';
   const ctx    = readContext(req);
@@ -228,6 +320,23 @@ router.post('/status', async (req, res) => {
 
   const OUTCOME_BY_STATUS = { 'no-answer': 'NO_ANSWER', busy: 'BUSY', failed: 'FAILED' };
   const outcome = OUTCOME_BY_STATUS[status];
+
+  // An escalation call that goes unanswered escalates onward to the SMS; it does
+  // not redial. Routing it into handleNoAnswer would put the caregiver into the
+  // recipient's retry loop, which is not what "fallback" means.
+  if (ctx.kind === 'ESCALATION_CALL') {
+    if (outcome || status === 'completed') {
+      setImmediate(() => {
+        const callManager = require('./callManager');
+        callManager.handleEscalationCallEnded(ctx.dose, {
+          callHistoryId: ctx.callHistoryId,
+          followUpId:    ctx.followUpId,
+          outcome,
+        }).catch(err => logger.error('handleEscalationCallEnded error', { error: err.message }));
+      });
+    }
+    return res.sendStatus(200);
+  }
 
   if (outcome) {
     setImmediate(() => {
@@ -252,7 +361,8 @@ router.post('/status', async (req, res) => {
 });
 
 module.exports = router;
-module.exports.classifyResponse = classifyResponse;
-module.exports.gatherTwiml      = gatherTwiml;
-module.exports.resolveBody      = resolveBody;
-module.exports.contextQuery     = contextQuery;
+module.exports.classifyResponse   = classifyResponse;
+module.exports.gatherTwiml        = gatherTwiml;
+module.exports.resolveBody        = resolveBody;
+module.exports.contextQuery       = contextQuery;
+module.exports.escalationMessage  = escalationMessage;
