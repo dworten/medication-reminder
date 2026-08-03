@@ -16,7 +16,8 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "db:seed": "prisma db seed"
+    "db:seed": "prisma db seed",
+    "db:history": "node scripts/history.js"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",
