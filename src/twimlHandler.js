@@ -348,12 +348,16 @@ router.post('/status', async (req, res) => {
       }).catch(err => logger.error('handleNoAnswer error', { error: err.message }));
     });
   } else if (status === 'completed') {
-    // Answered, but no confirmation ever recorded — she picked up and hung up.
-    // Guarded on PENDING so it can never overwrite a CONFIRMED written moments
-    // earlier by /response.
+    // Answered, but no confirmation ever recorded — she picked up and hung up,
+    // or said no and hung up. That is a missed dose she has actually told us
+    // about, so it retries and escalates exactly like a no-answer. The PENDING
+    // guard inside means a call she confirmed is never redialled.
     setImmediate(() => {
-      callHistoryRepo.closeIfPending(ctx.callHistoryId, 'NOT_CONFIRMED')
-        .catch(err => logger.error('closeIfPending error', { error: err.message }));
+      const callManager = require('./callManager');
+      callManager.handleAnsweredNoConfirmation(ctx.dose, ctx.attempt, {
+        scheduleId:    ctx.scheduleId,
+        callHistoryId: ctx.callHistoryId,
+      }).catch(err => logger.error('handleAnsweredNoConfirmation error', { error: err.message }));
     });
   }
 

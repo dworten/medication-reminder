@@ -164,15 +164,28 @@ async function loadScheduleContext(scheduleId) {
   }
 }
 
-// Triggered by Twilio status callback when a call goes unanswered.
+// Why the attempts ran out, in the words the caregiver's alert will carry.
+// "No answer" is wrong for a call she picked up and hung up on, and that
+// distinction is the whole reason someone is being woken up.
+function _exhaustedReason(outcome, maxAttempts) {
+  return outcome === 'NOT_CONFIRMED'
+    ? `answered without confirming, after all ${maxAttempts} attempts`
+    : `no answer after all ${maxAttempts} attempts`;
+}
+
+// Triggered by Twilio status callback when a call goes unanswered, and by
+// handleAnsweredNoConfirmation when one was answered but confirmed nothing.
 // ctx carries { scheduleId, callHistoryId } parsed from the webhook URL.
 async function handleNoAnswer(dose, attempt, ctx = {}) {
   const schedule = await loadScheduleContext(ctx.scheduleId);
   const settings = resolveSettings(schedule);
+  const outcome  = ctx.outcome || 'NO_ANSWER';
 
-  logger.call('No answer / failed', { dose, attempt, maxAttempts: settings.maxAttempts });
+  logger.call('Call ended unconfirmed', {
+    dose, attempt, outcome, maxAttempts: settings.maxAttempts,
+  });
 
-  await callHistoryRepo.recordOutcome(ctx.callHistoryId, ctx.outcome || 'NO_ANSWER');
+  await callHistoryRepo.recordOutcome(ctx.callHistoryId, outcome);
 
   if (attempt < settings.maxAttempts) {
     const next  = attempt + 1;
@@ -199,8 +212,47 @@ async function handleNoAnswer(dose, attempt, ctx = {}) {
       await escalate(dose, 'retry could not be scheduled (database unavailable)', schedule, ctx);
     }
   } else {
-    await escalate(dose, `no answer after all ${settings.maxAttempts} attempts`, schedule, ctx);
+    await escalate(dose, _exhaustedReason(outcome, settings.maxAttempts), schedule, ctx);
   }
+}
+
+// An answered call that ended without confirming anything — she picked up and
+// hung up, said no and hung up, or an answering machine took it.
+//
+// This used to just close the row and stop, so the one case where she has
+// actually TOLD you the dose was missed was the one case nobody was alerted
+// about, while simply not picking up escalated normally. It now takes the same
+// path as a no-answer: retry, then escalate.
+//
+// Returns whether it acted, which is what the tests assert on.
+async function handleAnsweredNoConfirmation(dose, attempt, ctx = {}) {
+  // The PENDING guard is what makes this safe to run on every completed call.
+  //
+  // /webhook/response writes CONFIRMED when she presses 1, and the
+  // reprompt-exhausted branch writes NOT_CONFIRMED and escalates on its own —
+  // both before Twilio can deliver `completed`, which it can only send after
+  // receiving our TwiML, speaking the goodbye and hanging up. If either already
+  // decided this row, closeIfPending reports false and we stop here rather than
+  // redialling a dose she confirmed.
+  //
+  // A null here means the write itself failed. Stopping is the right response:
+  // without knowing the row's state, retrying risks calling her after a
+  // confirmation, and the queued-work sweeper is not involved yet.
+  const flipped = await callHistoryRepo.closeIfPending(ctx.callHistoryId, 'NOT_CONFIRMED');
+
+  if (!flipped) {
+    logger.info('Call ended with its outcome already decided, nothing further to do', {
+      dose, attempt, callHistoryId: ctx.callHistoryId,
+    });
+    return false;
+  }
+
+  logger.call('Answered but nothing confirmed — treating as a missed dose', {
+    dose, attempt, callHistoryId: ctx.callHistoryId,
+  });
+
+  await handleNoAnswer(dose, attempt, { ...ctx, outcome: 'NOT_CONFIRMED' });
+  return true;
 }
 
 // The sweeper depends on this write, so it gets more than one shot at it before
@@ -607,6 +659,7 @@ module.exports = {
   initiateCall,
   handleNoAnswer,
   handleNeverConfirmed,
+  handleAnsweredNoConfirmation,
   handleEscalationCallEnded,
   acknowledgeEscalation,
   escalate,

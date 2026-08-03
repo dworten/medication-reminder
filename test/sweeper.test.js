@@ -285,6 +285,88 @@ async function main() {
   const esc = await prisma.callHistory.findFirst({ where: { kind: 'ESCALATION_SMS' } });
   check('escalation queued instead', Boolean(esc), true);
 
+  // ── answered, but nothing confirmed ──────────────────────────────────────
+  //
+  // She picks up and hangs up, or says no and hangs up. Twilio reports that as
+  // `completed`, which used to close the row and stop — so the one case where
+  // she has actually told you the dose was missed alerted nobody. It now takes
+  // the no-answer path. These cases exist mostly to prove it can never redial a
+  // call she confirmed.
+
+  section('answered then hung up: retried like a no-answer');
+  await truncateAll(prisma); await seedFixtures();
+  placed = []; texted = [];
+  const hungUp = await repo.startAttempt({
+    accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+    contactId: fixtures.contact.id, dose: 'morning', attempt: 1,
+  });
+  let acted = await callManager.handleAnsweredNoConfirmation('morning', 1, {
+    scheduleId: fixtures.schedule.id, callHistoryId: hungUp.id,
+  });
+  check('it acted', acted, true);
+  after = await prisma.callHistory.findUnique({ where: { id: hungUp.id } });
+  check('outcome NOT_CONFIRMED', after.outcome, 'NOT_CONFIRMED');
+  check('a retry was queued', Boolean(after.nextRetryAt), true);
+  check('due in ~5 minutes', Math.round((after.nextRetryAt - Date.now()) / 60000), 5);
+  check('nobody escalated to yet', await prisma.callHistory.count({ where: { kind: 'ESCALATION_SMS' } }), 0);
+
+  section('hanging up on the LAST attempt escalates, and says why');
+  await truncateAll(prisma); await seedFixtures();
+  texted = [];
+  const lastHangUp = await repo.startAttempt({
+    accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+    contactId: fixtures.contact.id, dose: 'evening', attempt: 3,
+  });
+  await callManager.handleAnsweredNoConfirmation('evening', 3, {
+    scheduleId: fixtures.schedule.id, callHistoryId: lastHangUp.id,
+  });
+  after = await prisma.callHistory.findUnique({ where: { id: lastHangUp.id } });
+  check('no retry past the last attempt', after.nextRetryAt, null);
+  const hangUpEsc = await prisma.callHistory.findFirst({ where: { kind: 'ESCALATION_SMS' } });
+  check('escalation queued', Boolean(hangUpEsc), true);
+  check('linked to the attempt', hangUpEsc.parentId, lastHangUp.id);
+  // "no answer after all 3 attempts" would be a lie about a call she picked up.
+  check('reason says she answered', hangUpEsc.errorMessage.includes('answered without confirming'), true);
+
+  section('NEVER REDIAL A CONFIRMED DOSE: a late `completed` is ignored');
+  await truncateAll(prisma); await seedFixtures();
+  placed = []; texted = [];
+  const confirmed = await repo.startAttempt({
+    accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+    contactId: fixtures.contact.id, dose: 'morning', attempt: 1,
+  });
+  await repo.recordOutcome(confirmed.id, 'CONFIRMED');
+  acted = await callManager.handleAnsweredNoConfirmation('morning', 1, {
+    scheduleId: fixtures.schedule.id, callHistoryId: confirmed.id,
+  });
+  check('it declined to act', acted, false);
+  after = await prisma.callHistory.findUnique({ where: { id: confirmed.id } });
+  check('still CONFIRMED', after.outcome, 'CONFIRMED');
+  check('no retry queued', after.nextRetryAt, null);
+  check('no escalation', await prisma.callHistory.count({ where: { kind: { not: 'REMINDER_CALL' } } }), 0);
+
+  section('the reprompt-exhausted path is not handled twice');
+  await truncateAll(prisma); await seedFixtures();
+  texted = [];
+  const exhausted = await repo.startAttempt({
+    accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+    contactId: fixtures.contact.id, dose: 'morning', attempt: 1,
+  });
+  // handleNeverConfirmed already ran: it recorded NOT_CONFIRMED and escalated.
+  await callManager.handleNeverConfirmed('morning', 1, {
+    scheduleId: fixtures.schedule.id, callHistoryId: exhausted.id, repromptCount: 3,
+  });
+  const escCount = await prisma.callHistory.count({ where: { kind: { not: 'REMINDER_CALL' } } });
+  // Now Twilio's `completed` arrives for the same call.
+  acted = await callManager.handleAnsweredNoConfirmation('morning', 1, {
+    scheduleId: fixtures.schedule.id, callHistoryId: exhausted.id,
+  });
+  check('it declined to act', acted, false);
+  after = await prisma.callHistory.findUnique({ where: { id: exhausted.id } });
+  check('no retry queued on top of the escalation', after.nextRetryAt, null);
+  check('still exactly one escalation',
+    await prisma.callHistory.count({ where: { kind: { not: 'REMINDER_CALL' } } }), escCount);
+
   await truncateAll(prisma);
   process.exitCode = summary() ? 1 : 0;
 }

@@ -53,9 +53,27 @@ Scheduler tick (every minute)
                  └─ REAL: Twilio REST → the schedule's contact
                             ├─ Answers → /webhook/initial → Gather TwiML
                             │    ├─ 1 / "yes" → goodbye + hangup      ✅ CONFIRMED
-                            │    └─ 2 / "no"  → reprompt → escalate    ❌ NOT_CONFIRMED
+                            │    ├─ 2 / "no" ×4 → reprompts exhausted → escalate now
+                            │    └─ hangs up → retry → escalate        ❌ NOT_CONFIRMED
                             └─ No answer → /webhook/status → retry → escalate 📲 NO_ANSWER
 ```
+
+**An answered call that confirms nothing is a missed dose.** If she picks up and
+hangs up — or says no and hangs up — Twilio reports `completed`, which used to
+close the record and stop there. That meant the one case where she has actually
+*told* you the dose was missed alerted nobody, while simply not picking up
+escalated normally. It now takes the same path as a no-answer: two retries five
+minutes apart, then the caregiver.
+
+Staying on the line and saying "no" is different, and still escalates
+immediately — she is reachable and has answered, so redialling would only pester
+her. Only the reprompt-exhausted branch does that.
+
+The guard that makes this safe is `closeIfPending`. `/webhook/response` writes
+`CONFIRMED` the moment she presses 1, and Twilio can only deliver `completed`
+after receiving that TwiML, speaking the goodbye and hanging up — so the
+conditional update finds a row that is no longer `PENDING` and does nothing. A
+confirmed dose is never redialled.
 
 ### Escalation chain
 
@@ -426,7 +444,20 @@ npm test
 
 Five suites. `scheduleMatch` is pure and needs nothing; the other four read and write a real database and **truncate every table between cases**.
 
-They refuse to run the moment they see an account whose email is not a `@example.test` fixture — so once you have seeded your real account, `DATABASE_URL` must point at a **scratch database** before `npm test` will do anything. Create a second Postgres service in Railway (or run one locally) and use its URL for testing. Note that `?schema=` in the URL is not enough to isolate them: the Prisma CLI honours it, but the running client connects through a plain node-postgres adapter that ignores it, so migrations would land in one schema while the app read another. It needs to be a different database.
+They refuse to run the moment they see an account whose email is not a `@example.test` fixture — so once you have seeded your real account, `DATABASE_URL` must point at a **scratch database** before `npm test` will do anything.
+
+The cheapest way is a second database on the same Postgres server, which already exists:
+
+```bash
+# one-off, if it is ever dropped
+psql "$DATABASE_URL" -c 'CREATE DATABASE medication_reminder_test'
+
+# then, per run — note the database name at the end of the URL
+DATABASE_URL='postgresql://postgres:PASSWORD@HOST:PORT/medication_reminder_test' npx prisma migrate deploy
+DATABASE_URL='postgresql://postgres:PASSWORD@HOST:PORT/medication_reminder_test' npm test
+```
+
+`?schema=` is **not** a substitute. The Prisma CLI honours it, so migrations land in the named schema, but the running client connects through a plain node-postgres adapter that ignores it and reads `public` — the isolation silently collapses and the suites truncate your real tables. The database name in the URL path is respected by every layer; the schema parameter is not. `src/db.js` warns at boot if it ever sees one.
 
 ---
 
