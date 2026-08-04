@@ -101,17 +101,30 @@ async function _defaultAccountId() {
   }
 }
 
-// 'Enable' decides human-or-machine at the moment of answer and reports it as
-// AnsweredBy on the TwiML request. Deliberately not 'DetectMessageEnd', which
-// waits for the beep so a message CAN be left — the opposite of what is wanted.
+// The two call types want opposite things from an answering machine.
 //
-// The timeout bounds the worst case: if Twilio still cannot tell after this
-// long it gives up, reports `unknown`, and the call proceeds as a human. That
-// default matters — an inconclusive detection must never silently drop a
-// reminder.
-function machineDetectionParams() {
+//   'Enable'           reports the verdict as soon as the line answers, at the
+//                      START of a greeting. Right for the reminder call, which
+//                      hangs up: there is no point reciting "have you taken your
+//                      medicine, press 1" into a machine that cannot answer.
+//
+//   'DetectMessageEnd' waits for the greeting to finish and the beep to sound
+//                      before requesting TwiML. Right for the escalation call,
+//                      which DOES leave a message — a voicemail saying the dose
+//                      was not confirmed is a real alert. Under 'Enable' that
+//                      message would start playing over the outgoing greeting
+//                      and be half-recorded.
+//
+// The timeout bounds the worst case: if Twilio still cannot tell, it gives up,
+// reports `unknown`, and the call proceeds as if a person answered. That default
+// matters — an inconclusive verdict must never silently drop an alert.
+function machineDetectionParams(mode = 'Enable') {
   if (!config.machineDetection) return {};
-  return { machineDetection: 'Enable', machineDetectionTimeout: 15 };
+  return {
+    machineDetection: mode,
+    // Waiting for a beep legitimately takes longer than spotting a greeting.
+    machineDetectionTimeout: mode === 'DetectMessageEnd' ? 30 : 15,
+  };
 }
 
 // Webhook URLs carry dose and attempt exactly as they always have. Everything
@@ -614,9 +627,10 @@ async function deliverEscalationCall(row) {
     statusCallback:       `${config.baseUrl}/webhook/status?${qs}`,
     statusCallbackEvent:  ['initiated', 'ringing', 'answered', 'completed'],
     statusCallbackMethod: 'POST',
-    // Same reasoning as the reminder call: no alert recited into voicemail. The
-    // follow-up SMS is already queued, so the caregiver is still told.
-    ...machineDetectionParams(),
+    // Unlike the reminder call, this one leaves a message — so wait for the
+    // beep rather than talking over the greeting. The follow-up SMS still goes
+    // out either way, since a machine never presses 1.
+    ...machineDetectionParams('DetectMessageEnd'),
   });
 
   await callHistoryRepo.attachCallSid(row.id, call.sid);

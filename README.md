@@ -60,17 +60,29 @@ Scheduler tick (every minute)
                             └─ No answer → /webhook/status → retry → escalate 📲 NO_ANSWER
 ```
 
-**Voicemail is not an answer.** Declining a call sends it to voicemail, and
-Twilio reports that as answered. Without detection the reminder is recited into
-the machine, which then sits silently through every reprompt — landing on the
-reprompt-exhausted branch, which escalates *immediately*. The observable symptom
-is the caregiver being called about a minute after she declined, instead of her
-being tried again. `machineDetection: 'Enable'` makes Twilio report `AnsweredBy`,
-and a machine gets `<Hangup/>` before anything is spoken, so the call ends as
-unconfirmed and takes the normal retry path.
+**Voicemail is handled differently for each call, on purpose.**
 
-An inconclusive verdict (`unknown`) is deliberately treated as a person. A
-detection that could not decide must never hang up on her.
+| | Reminder call → grandma | Escalation call → caregiver |
+|---|---|---|
+| Detection mode | `Enable` — verdict at answer | `DetectMessageEnd` — waits for the beep |
+| On a machine | `<Hangup/>`, no message | **Leaves a message**, then hangs up |
+| Then | retried like a no-answer | SMS still sent |
+
+Reciting *"have you taken your medicine, press 1"* into an answering machine
+helps nobody — it cannot answer. Worse, without detection the machine sits
+silently through every reprompt, which lands on the reprompt-exhausted branch
+and escalates *immediately*: the observable symptom was the caregiver being
+called about a minute after she declined, instead of her being tried again.
+
+A voicemail for the caregiver is the opposite case — it is a real alert, and
+they may not read a text for hours. So that call waits for the beep before
+speaking, otherwise the message would start over the outgoing greeting and be
+half-recorded. The recording drops the "press 1" prompt, since a `<Gather>` into
+voicemail would sit through its timeout and then record the prompt again on
+every reprompt.
+
+An inconclusive verdict (`unknown`) is deliberately treated as a person in both
+cases. Detection that could not decide must never hang up on her.
 
 **An answered call that confirms nothing is a missed dose.** If she picks up and
 hangs up — or says no and hangs up — Twilio reports `completed`, which used to

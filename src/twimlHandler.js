@@ -274,11 +274,24 @@ router.post('/response', async (req, res) => {
 const ESC_QUESTION = 'Press 1 to acknowledge this alert.';
 const ESC_ACK      = 'Thank you. This alert has been acknowledged. Goodbye.';
 const ESC_UNACK    = 'No acknowledgment received. A text message will be sent instead. Goodbye.';
+// Said instead of ESC_QUESTION when a machine took the call. It replaces the
+// prompt rather than following it, so the recording never asks for a keypress
+// nobody is there to make.
+const ESC_VOICEMAIL = 'A text message with the details has also been sent. Goodbye.';
 
 function escalationMessage(ctx) {
   const who  = ctx.recipient ? `${ctx.recipient}` : 'The medication recipient';
   const when = ctx.dose === 'morning' ? 'morning' : 'evening';
   return `This is an automated medication alert. ${who} did not confirm taking the ${when} medication.`;
+}
+
+// The alert as a recording: no Gather, so nothing waits on input that will never
+// come, and the message is spoken once rather than repeated by a reprompt loop.
+function voicemailTwiml(ctx) {
+  const r = new VoiceResponse();
+  r.say(`${escalationMessage(ctx)} ${ESC_VOICEMAIL}`);
+  r.hangup();
+  return r.toString();
 }
 
 // Called by Twilio when the fallback contact answers
@@ -290,10 +303,21 @@ router.post('/escalation', (req, res) => {
     answeredBy: req.body.AnsweredBy || 'n/a',
   });
 
-  // A machine cannot press 1, so the acknowledgment can never come and the
-  // queued SMS goes out either way. Hanging up just spares the caregiver a
-  // voicemail duplicating the text they are about to receive.
-  if (answeredByMachine(req)) return hangUpOnMachine(res, ctx, 'Escalation call');
+  // Unlike the reminder call, this one DOES leave a message: a voicemail saying
+  // the dose was not confirmed is a real alert, and the caregiver may not read
+  // a text for hours. Twilio was asked to wait for the beep, so this plays into
+  // the recording rather than over the greeting.
+  //
+  // Without the "press 1" prompt, though — a machine cannot act on it, and a
+  // Gather into voicemail would sit through its timeout and then record the
+  // prompt again on every reprompt.
+  if (answeredByMachine(req)) {
+    logger.call('Escalation call reached voicemail, leaving a message', {
+      dose: ctx.dose, callHistoryId: ctx.callHistoryId,
+    });
+    res.type('text/xml').send(voicemailTwiml(ctx));
+    return;
+  }
 
   // No database read at all on this path: everything the message needs already
   // rode in on the query string, and an alert call is the last place to add a
@@ -412,3 +436,4 @@ module.exports.resolveBody        = resolveBody;
 module.exports.contextQuery       = contextQuery;
 module.exports.escalationMessage  = escalationMessage;
 module.exports.answeredByMachine  = answeredByMachine;
+module.exports.voicemailTwiml     = voicemailTwiml;

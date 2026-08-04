@@ -91,6 +91,19 @@ async function main() {
   check('absent → speak',           answeredBy(undefined), false);
   check('case-insensitive',         answeredBy('Machine_Start'), true);
 
+  console.log('\n--- the caregiver DOES get a voicemail, without the press-1 prompt ---');
+  const vm = twiml.voicemailTwiml({ dose: 'evening', recipient: 'Grandma' });
+  contains('names who and which dose', vm, 'Grandma did not confirm taking the evening medication.');
+  contains('says a text is coming too', vm, 'A text message with the details has also been sent.');
+  contains('hangs up after the message', vm, '<Hangup/>');
+  // A Gather into voicemail would sit through its timeout and then record the
+  // whole prompt again on every reprompt.
+  check('no Gather', vm.includes('<Gather'), false);
+  check('no press-1 prompt', vm.includes('Press 1'), false);
+
+  const vmNoName = twiml.voicemailTwiml({ dose: 'morning', recipient: null });
+  contains('falls back when no name rode in', vmNoName, 'The medication recipient did not confirm');
+
   await truncateAll(prisma);
 
   process.exitCode = summary() ? 1 : 0;
