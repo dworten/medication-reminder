@@ -68,6 +68,10 @@ async function initiateCall(dose, attempt, options = {}) {
         // destination is overridden, and the retry needs the latter — otherwise
         // a /trigger?target=test call changes phones halfway through.
         toPhone:    to,
+        // Set when this attempt is a retry of an earlier one, which makes the
+        // whole sequence a chain and gives the sweeper an exact answer to
+        // "did I already place this?".
+        parentId:   options.parentId || null,
         dose,
         attempt,
       });

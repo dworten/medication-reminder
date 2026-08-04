@@ -46,15 +46,14 @@ async function _fireRetry(row, now) {
 
   const nextAttempt = row.attempt + 1;
 
-  // Was this attempt already placed by a run that died before it could record
-  // the fact? If so the call went out and re-firing would ring her twice.
-  const since = new Date(now.getTime() - 6 * 60 * 60 * 1000);
-  const already = await callHistoryRepo.hasAttempt({
-    scheduleId: row.scheduleId,
-    dose:       row.dose,
-    attempt:    nextAttempt,
-    since,
-  });
+  // Was this retry already placed by a run that died before it could record the
+  // fact? If so the call went out and re-firing would ring her twice.
+  //
+  // Asked of this attempt's own children, so the answer is exact. The previous
+  // version matched on (schedule, dose, attempt) inside a six-hour window, which
+  // suppressed the retry whenever two test calls were placed in one morning —
+  // the second call's retry found the first call's attempt-2 row and skipped.
+  const already = await callHistoryRepo.findChildByKind(row.id, 'REMINDER_CALL');
 
   if (already) {
     logger.warn('Retry already placed by an earlier run, skipping', {
@@ -70,6 +69,10 @@ async function _fireRetry(row, now) {
 
   await callManager.initiateCall(row.dose, nextAttempt, {
     schedule: row.schedule || null,
+    // Links the new attempt to this one. That link IS the idempotency check
+    // above, and (parent_id, kind) is UNIQUE, so even two sweeps racing can
+    // only produce one retry.
+    parentId: row.id,
     // The number the previous attempt actually rang, not the contact's current
     // one. A retry has to reach the same phone the sequence started on, or a
     // /trigger?target=test call rings the test phone and then jumps to the real

@@ -22,7 +22,7 @@ async function _try(label, fn) {
 
 // Opens a row the moment a call is attempted, before Twilio is contacted, so a
 // call that throws still leaves evidence it was tried.
-async function startAttempt({ accountId, scheduleId, contactId, dose, attempt, toPhone, kind = 'REMINDER_CALL' }) {
+async function startAttempt({ accountId, scheduleId, contactId, dose, attempt, toPhone, parentId, kind = 'REMINDER_CALL' }) {
   return _try('startAttempt', (p) =>
     p.callHistory.create({
       data: {
@@ -30,6 +30,7 @@ async function startAttempt({ accountId, scheduleId, contactId, dose, attempt, t
         scheduleId: scheduleId || null,
         contactId:  contactId  || null,
         toPhone:    toPhone    || null,
+        parentId:   parentId   || null,
         dose,
         attempt,
         kind,
@@ -181,18 +182,16 @@ async function releaseClaim(id) {
   });
 }
 
-// Idempotency guard for the crash-after-dial window: if the process died
-// between Twilio accepting a call and the database recording it, the stale
-// claim would re-fire that same attempt. Checking whether the attempt already
-// exists turns that duplicate call into a no-op.
-async function hasAttempt({ scheduleId, dose, attempt, since }) {
-  if (!scheduleId) return false;
-  const found = await db.getClient().callHistory.findFirst({
-    where: { scheduleId, dose, attempt, kind: 'REMINDER_CALL', startedAt: { gte: since } },
-    select: { id: true },
-  });
-  return Boolean(found);
-}
+// Idempotency for retries is the parent link, not a heuristic — see
+// findChildByKind. A retry is a REMINDER_CALL child of the attempt that spawned
+// it, so "has this retry already gone out?" is an exact question with an exact
+// answer, and (parent_id, kind) being UNIQUE means two sweeps cannot both win.
+//
+// This replaced a match on (schedule, dose, attempt) within a six-hour window.
+// That held for a real twice-daily schedule, where the same attempt number
+// cannot recur inside six hours, but silently suppressed the retry whenever two
+// manual test calls were placed in one morning: the second call's retry found
+// the first call's attempt-2 row and concluded it had already dialled.
 
 // Escalations are queued, not sent inline, so a crash between "attempts
 // exhausted" and "SMS sent" cannot lose the alert. The caller kicks the sweeper
@@ -307,7 +306,7 @@ async function countPendingWork() {
 
 module.exports = {
   startAttempt, attachCallSid, recordOutcome, closeIfPending, findById, recentForSchedule,
-  scheduleRetry, findDueWork, claimWork, completeWork, releaseClaim, hasAttempt,
+  scheduleRetry, findDueWork, claimWork, completeWork, releaseClaim,
   enqueueEscalation, countPendingWork, SWEEP_INCLUDE,
   findChildByKind, chainFrom, cancelWork, makeDueNow, currentOutcome,
   recordDestination,

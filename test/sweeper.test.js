@@ -20,10 +20,15 @@ let failNextSms  = false;
 
 callManager.initiateCall = async (dose, attempt, options = {}) => {
   if (failNextCall) { failNextCall = false; throw new Error('simulated Twilio outage'); }
+  // Mirrors what the real initiateCall records, minus the Twilio request. The
+  // parentId in particular has to be forwarded: it is what the sweeper's
+  // idempotency check reads back.
   const row = await repo.startAttempt({
     accountId:  options.schedule ? options.schedule.accountId : fixtures.account.id,
     scheduleId: options.schedule ? options.schedule.id : null,
     contactId:  options.schedule && options.schedule.contact ? options.schedule.contact.id : null,
+    toPhone:    options.to,
+    parentId:   options.parentId,
     dose, attempt,
   });
   placed.push({ dose, attempt, id: row && row.id, to: options.to });
@@ -137,12 +142,12 @@ async function main() {
   await truncateAll(prisma); await seedFixtures();
   placed = [];
   row = await queueRetry({ attempt: 1 });
-  // Attempt 2 already exists — i.e. the call went out, then the process died
-  // before it could clear next_retry_at.
+  // This attempt's retry already went out, then the process died before it
+  // could clear next_retry_at — so the row comes back round.
   await prisma.callHistory.create({
     data: {
       accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
-      contactId: fixtures.contact.id, dose: 'morning', attempt: 2,
+      contactId: fixtures.contact.id, parentId: row.id, dose: 'morning', attempt: 2,
       kind: 'REMINDER_CALL', outcome: 'NO_ANSWER',
     },
   });
@@ -151,6 +156,40 @@ async function main() {
   check('but no second call placed', placed.length, 0);
   after = await prisma.callHistory.findUnique({ where: { id: row.id } });
   check('and the item was closed out', after.nextRetryAt, null);
+
+  section('a SEPARATE call\'s retry is not mistaken for this one');
+  // Two test calls in one morning. Both are attempt 1 of the same schedule and
+  // dose, so matching on (schedule, dose, attempt) inside a time window made the
+  // second call's retry find the FIRST call's attempt-2 row and skip — the
+  // sequence silently stopped dead with no retry and no escalation.
+  await truncateAll(prisma); await seedFixtures();
+  placed = [];
+  const firstCall = await queueRetry({ attempt: 1, dueAt: new Date(Date.now() - 60000) });
+  await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, parentId: firstCall.id, dose: 'morning', attempt: 2,
+      kind: 'REMINDER_CALL', outcome: 'NO_ANSWER',
+    },
+  });
+  await prisma.callHistory.update({ where: { id: firstCall.id }, data: { nextRetryAt: null } });
+
+  // Now a second, unrelated test call — same schedule, same dose, also attempt 1.
+  const secondCall = await queueRetry({ attempt: 1 });
+  result = await sweeper.runOnce();
+  check('the second call retried', placed.length, 1);
+  check('as attempt 2', placed[0].attempt, 2);
+  const retryRow = await prisma.callHistory.findFirst({ where: { parentId: secondCall.id } });
+  check('linked to the call that spawned it', Boolean(retryRow), true);
+
+  section('NO DOUBLE CALL: concurrent sweeps cannot both place a retry');
+  await truncateAll(prisma); await seedFixtures();
+  placed = [];
+  const raced = await queueRetry({ attempt: 1 });
+  await Promise.all(Array.from({ length: 6 }, () => sweeper.runOnce()));
+  check('exactly one retry placed', placed.length, 1);
+  check('exactly one child row',
+    await prisma.callHistory.count({ where: { parentId: raced.id } }), 1);
 
   section('a failed work item is released, not stuck');
   await truncateAll(prisma); await seedFixtures();
