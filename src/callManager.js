@@ -93,6 +93,19 @@ async function _defaultAccountId() {
   }
 }
 
+// 'Enable' decides human-or-machine at the moment of answer and reports it as
+// AnsweredBy on the TwiML request. Deliberately not 'DetectMessageEnd', which
+// waits for the beep so a message CAN be left — the opposite of what is wanted.
+//
+// The timeout bounds the worst case: if Twilio still cannot tell after this
+// long it gives up, reports `unknown`, and the call proceeds as a human. That
+// default matters — an inconclusive detection must never silently drop a
+// reminder.
+function machineDetectionParams() {
+  if (!config.machineDetection) return {};
+  return { machineDetection: 'Enable', machineDetectionTimeout: 15 };
+}
+
 // Webhook URLs carry dose and attempt exactly as they always have. Everything
 // else is appended and optional, so a call placed before a deploy still
 // completes correctly against the new code, and every handler falls back to the
@@ -140,6 +153,10 @@ async function _realCall(dose, attempt, ctx) {
       statusCallback:       statusUrl,
       statusCallbackEvent:  ['initiated', 'ringing', 'answered', 'completed'],
       statusCallbackMethod: 'POST',
+      // Twilio then passes AnsweredBy to the TwiML webhook, which hangs up on a
+      // machine rather than reciting the reminder into her voicemail. Everything
+      // else about this call is unchanged.
+      ...machineDetectionParams(),
     });
 
     logger.call('Call placed', { sid: call.sid, dose, attempt });
@@ -588,6 +605,9 @@ async function deliverEscalationCall(row) {
     statusCallback:       `${config.baseUrl}/webhook/status?${qs}`,
     statusCallbackEvent:  ['initiated', 'ringing', 'answered', 'completed'],
     statusCallbackMethod: 'POST',
+    // Same reasoning as the reminder call: no alert recited into voicemail. The
+    // follow-up SMS is already queued, so the caregiver is still told.
+    ...machineDetectionParams(),
   });
 
   await callHistoryRepo.attachCallSid(row.id, call.sid);

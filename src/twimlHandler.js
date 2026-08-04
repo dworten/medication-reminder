@@ -163,11 +163,46 @@ function gatherTwiml(body, actionUrl, question = MSG_QUESTION) {
   return r.toString();
 }
 
+// Twilio's answering-machine verdict, present only when machineDetection is on.
+//
+// `unknown` is deliberately absent: detection that could not decide must be
+// treated as a person, or an inconclusive result would hang up on her. The
+// machine_end_* values cannot occur under 'Enable' but cost nothing to cover.
+const MACHINE_ANSWERS = new Set([
+  'machine_start', 'machine_end_beep', 'machine_end_silence', 'machine_end_other', 'fax',
+]);
+
+function answeredByMachine(req) {
+  return MACHINE_ANSWERS.has((req.body.AnsweredBy || '').toLowerCase());
+}
+
+// Hangs up without speaking. Reciting a medication reminder into voicemail
+// leaves a message nobody asked for, and — worse — the machine then sits
+// silently through every reprompt, which used to land on the "answered but
+// never confirmed" branch and call the caregiver about a minute later instead
+// of simply trying her again.
+//
+// Hanging up ends the call as `completed` with nothing confirmed, which is the
+// retry path. She gets called back rather than escalated on.
+function hangUpOnMachine(res, ctx, what) {
+  logger.call(`${what}: answering machine picked up, hanging up without leaving a message`, {
+    dose: ctx.dose, attempt: ctx.attempt, callHistoryId: ctx.callHistoryId,
+  });
+  const r = new VoiceResponse();
+  r.hangup();
+  res.type('text/xml').send(r.toString());
+}
+
 // Called by Twilio when the call is answered
 // POST /webhook/initial?dose=morning&attempt=1[&sched=&ch=&mr=]
 router.post('/initial', async (req, res) => {
   const ctx = readContext(req);
-  logger.call('webhook /initial', { dose: ctx.dose, attempt: ctx.attempt, scheduleId: ctx.scheduleId });
+  logger.call('webhook /initial', {
+    dose: ctx.dose, attempt: ctx.attempt, scheduleId: ctx.scheduleId,
+    answeredBy: req.body.AnsweredBy || 'n/a',
+  });
+
+  if (answeredByMachine(req)) return hangUpOnMachine(res, ctx, 'Reminder call');
 
   const body   = await resolveBody(ctx.scheduleId);
   const action = `/webhook/response?${contextQuery(ctx, { reprompts: 0 })}`;
@@ -252,7 +287,13 @@ router.post('/escalation', (req, res) => {
   const ctx = readContext(req);
   logger.call('webhook /escalation', {
     dose: ctx.dose, callHistoryId: ctx.callHistoryId, followUpSmsId: ctx.followUpId,
+    answeredBy: req.body.AnsweredBy || 'n/a',
   });
+
+  // A machine cannot press 1, so the acknowledgment can never come and the
+  // queued SMS goes out either way. Hanging up just spares the caregiver a
+  // voicemail duplicating the text they are about to receive.
+  if (answeredByMachine(req)) return hangUpOnMachine(res, ctx, 'Escalation call');
 
   // No database read at all on this path: everything the message needs already
   // rode in on the query string, and an alert call is the last place to add a
@@ -370,3 +411,4 @@ module.exports.gatherTwiml        = gatherTwiml;
 module.exports.resolveBody        = resolveBody;
 module.exports.contextQuery       = contextQuery;
 module.exports.escalationMessage  = escalationMessage;
+module.exports.answeredByMachine  = answeredByMachine;

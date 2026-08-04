@@ -89,6 +89,19 @@ const config = {
   // and without a ceiling a permanently failing item would be retried forever.
   retryGiveUpHours: parseInt(process.env.RETRY_GIVE_UP_HOURS || '6', 10),
 
+  // Answering-machine detection.
+  //
+  // Without it, voicemail counts as an answered call: the reminder plays into
+  // the machine, then sits through every reprompt getting no input, which lands
+  // on the "answered but never confirmed" branch and calls the caregiver about
+  // a minute later — instead of simply trying her again.
+  //
+  // Twilio holds the TwiML request until it decides human or machine, so this
+  // costs a small per-call fee and delays a human's greeting by a second or two.
+  // It is a switch rather than a constant so it can be turned off from Railway
+  // without a deploy if it ever misjudges a real person.
+  machineDetection: process.env.MACHINE_DETECTION !== 'false',
+
   // Escalation chain fallbacks.
   //
   // Like the retry settings above, these apply only when no schedule sits behind

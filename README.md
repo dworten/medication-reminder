@@ -2,7 +2,9 @@
 
 Automated twice-daily phone calls reminding your grandmother to take her medication, built with Node.js + Twilio Programmable Voice, deployed on Railway.
 
-Calls are placed at **9:20 AM and 9:20 PM US Central** by default (morning calls skipped on Sundays). If she doesn't answer, it retries up to 2 more times, 5 minutes apart. If she never confirms, it escalates to a caregiver — a text, or a call then a text, depending on how the schedule is configured.
+Calls are placed at **9:20 AM and 9:20 PM US Central** by default (morning calls skipped on Sundays). If she doesn't answer, it tries again a few minutes later; if she still doesn't confirm, it escalates to a caregiver — a call, a text, or both, depending on how the schedule is configured. Attempt counts, retry gaps and escalation steps are columns on the schedule row, not constants.
+
+Voicemail is not treated as an answer: Twilio's answering-machine detection hangs up without leaving a message, and the call is retried instead.
 
 Call times, contacts, messages and escalation settings all live in **PostgreSQL** — edit them with `npm run db:studio` and the scheduler picks the change up within a minute, no redeploy. `npm run db:seed` creates a working setup from scratch; `npm run db:history` shows what actually happened.
 
@@ -57,6 +59,18 @@ Scheduler tick (every minute)
                             │    └─ hangs up → retry → escalate        ❌ NOT_CONFIRMED
                             └─ No answer → /webhook/status → retry → escalate 📲 NO_ANSWER
 ```
+
+**Voicemail is not an answer.** Declining a call sends it to voicemail, and
+Twilio reports that as answered. Without detection the reminder is recited into
+the machine, which then sits silently through every reprompt — landing on the
+reprompt-exhausted branch, which escalates *immediately*. The observable symptom
+is the caregiver being called about a minute after she declined, instead of her
+being tried again. `machineDetection: 'Enable'` makes Twilio report `AnsweredBy`,
+and a machine gets `<Hangup/>` before anything is spoken, so the call ends as
+unconfirmed and takes the normal retry path.
+
+An inconclusive verdict (`unknown`) is deliberately treated as a person. A
+detection that could not decide must never hang up on her.
 
 **An answered call that confirms nothing is a missed dose.** If she picks up and
 hangs up — or says no and hangs up — Twilio reports `completed`, which used to
@@ -353,9 +367,10 @@ These five are **fallbacks only**. A call placed from a schedule uses that sched
 
 | Variable | Default | Description |
 |---|---|---|
-| `MAX_CALL_ATTEMPTS` | `3` | Total call attempts (1 initial + 2 retries) |
+| `MAX_CALL_ATTEMPTS` | `3` | Total call attempts, counting the first |
 | `RETRY_DELAY_MINUTES` | `5` | Minutes between retries after no answer |
 | `MAX_REPROMPTS` | `3` | Max re-asks within a single answered call |
+| `MACHINE_DETECTION` | `true` | Hang up on voicemail instead of leaving a message. Applies to every call, not just schedule-driven ones |
 | `ESCALATE_WITH_CALL` | `false` | Call the fallback contact before texting them |
 | `ESCALATE_WITH_SMS` | `true` | Text the fallback contact |
 | `ESCALATION_ACK_MINUTES` | `3` | Grace period to press 1 on the escalation call before the text goes out |

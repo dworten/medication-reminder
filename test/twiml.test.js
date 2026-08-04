@@ -79,6 +79,18 @@ async function main() {
   check('"one" → yes',        twiml.classifyResponse('', 'one'), 'yes');
   check('garbage → unknown',  twiml.classifyResponse('', 'purple monkey'), 'unknown');
 
+  console.log('\n--- answering machines are hung up on, people are not ---');
+  const answeredBy = (v) => twiml.answeredByMachine({ body: v === undefined ? {} : { AnsweredBy: v } });
+  check('machine_start → hang up',  answeredBy('machine_start'), true);
+  check('fax → hang up',            answeredBy('fax'), true);
+  check('machine_end_beep → hang up', answeredBy('machine_end_beep'), true);
+  check('human → speak',            answeredBy('human'), false);
+  // The two that must never hang up on her: detection that could not decide,
+  // and detection that never ran because the switch is off.
+  check('unknown → speak',          answeredBy('unknown'), false);
+  check('absent → speak',           answeredBy(undefined), false);
+  check('case-insensitive',         answeredBy('Machine_Start'), true);
+
   await truncateAll(prisma);
 
   process.exitCode = summary() ? 1 : 0;
