@@ -64,6 +64,8 @@ async function waitFor(predicate, { timeoutMs = 5000, everyMs = 25 } = {}) {
 
 async function truncateAll(prisma) {
   // FK-safe order: schedules reference contacts with RESTRICT.
+  // call_history rows reference each other via parent_id, so they go first as a
+  // group — the FK is SET NULL, which a bulk delete satisfies.
   await prisma.callHistory.deleteMany({});
   await prisma.schedule.deleteMany({});
   await prisma.message.deleteMany({});

@@ -65,6 +65,13 @@ const config = {
   validateTwilioSignature: process.env.VALIDATE_TWILIO_SIGNATURE !== 'false',
   triggerSecret: process.env.TRIGGER_SECRET || '',
 
+  // Signs the session cookie. Without it a session id can be forged, which is
+  // the whole of the authentication. Required in live mode — see validate();
+  // in mock mode src/session.js falls back to a per-process random value, so
+  // local runs work but logins do not survive a restart.
+  sessionSecret:   process.env.SESSION_SECRET || '',
+  sessionTtlHours: parseInt(process.env.SESSION_TTL_HOURS || '720', 10),
+
   // Retry / flow settings.
   //
   // These are now FALLBACKS, not the source of truth. A call placed from a
@@ -128,6 +135,15 @@ function validate() {
   }
 
   if (config.mockMode) return problems;
+
+  // A guessable session secret means a forgeable login, and the API it guards
+  // can change who gets called and when. Refusing to boot is the right response
+  // — a default value here would be a silent hole rather than a loud failure.
+  if (!config.sessionSecret) {
+    problems.push('SESSION_SECRET is not set — session cookies would be forgeable');
+  } else if (config.sessionSecret.length < 32) {
+    problems.push('SESSION_SECRET is too short — use at least 32 characters');
+  }
 
   const hasApiKey    = config.twilioApiKeySid && config.twilioApiKeySecret;
   const hasAuthToken = Boolean(config.twilioAuthToken);

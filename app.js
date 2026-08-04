@@ -4,8 +4,11 @@
 // service's environment directly.
 require('dotenv').config();
 
+const path        = require('path');
 const express     = require('express');
 const config      = require('./src/config');
+const session     = require('./src/session');
+const apiRouter   = require('./src/api');
 const logger      = require('./src/logger');
 const twimlRouter = require('./src/twimlHandler');
 const scheduler    = require('./src/scheduler');
@@ -25,7 +28,27 @@ app.use(express.json());
 
 // TwiML webhook routes — Twilio POSTs here during live calls.
 // Signature-guarded inside the router.
+//
+// Mounted BEFORE the session middleware and outside it, deliberately. Twilio
+// cannot log in and will never carry a cookie, so a live call takes exactly the
+// path it did before authentication existed — no session lookup, no store round
+// trip, nothing new between the request and the TwiML.
 app.use('/webhook', twimlRouter);
+
+// Sessions, only where they are needed. /trigger is included because it accepts
+// a logged-in session as an alternative to the shared secret.
+app.use(['/api', '/login', '/trigger'], session.middleware());
+
+// The API. A router, so app.js keeps owning the process and nothing else here
+// has to change.
+app.use('/api', apiRouter());
+
+// Minimal sign-in page. The real interface is the next step.
+app.get('/login', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+app.get('/', (_req, res) => res.redirect('/login'));
 
 // Manual trigger: POST /trigger?dose=morning  (or body: { "dose": "morning" })
 // Useful for ad-hoc testing without waiting for the cron schedule.

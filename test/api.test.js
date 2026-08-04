@@ -1,0 +1,389 @@
+'use strict';
+// Phase 3, step 1 — the API and its authentication.
+//
+// Driven over real HTTP against the real router on an ephemeral port, using
+// Node's built-in fetch. Nothing is stubbed: the session cookie is issued by
+// express-session, stored in Postgres, and returned by the client the way a
+// browser would. Mocking any of that would test the mock.
+//
+// The case this suite exists for is the last one: a request carrying another
+// account's row id must get 404, not data. Everything else is table stakes.
+
+const { check, contains, section, summary, assertScratchDatabase, truncateAll } = require('./helpers');
+require('dotenv').config();
+
+const express = require('express');
+const bcrypt  = require('bcryptjs');
+
+const db        = require('../src/db');
+const config    = require('../src/config');
+const apiRouter = require('../src/api');
+
+// Live-mode cookies are `secure`, which a plain-http test server never sends
+// back. This is the one setting that has to differ from production.
+config.nodeEnv = 'test';
+config.sessionSecret = config.sessionSecret || 'test-session-secret-at-least-32-chars-long';
+
+const session = require('../src/session');
+const prisma  = db.getClient();
+
+const PASSWORD = 'correct-horse-battery-staple';
+
+let server, base;
+
+function start() {
+  const app = express();
+  app.set('trust proxy', true);
+  app.use(express.json());
+  app.use(session.middleware());
+  app.use('/api', apiRouter());
+
+  return new Promise((resolve) => {
+    server = app.listen(0, '127.0.0.1', () => {
+      base = `http://127.0.0.1:${server.address().port}`;
+      resolve();
+    });
+  });
+}
+
+// A cookie jar just big enough to behave like a browser for one origin.
+function makeClient() {
+  let cookie = null;
+
+  return async function request(method, path, body) {
+    const res = await fetch(`${base}${path}`, {
+      method,
+      headers: {
+        ...(body !== undefined && { 'Content-Type': 'application/json' }),
+        ...(cookie && { Cookie: cookie }),
+      },
+      ...(body !== undefined && { body: JSON.stringify(body) }),
+    });
+
+    const setCookie = res.headers.get('set-cookie');
+    if (setCookie) cookie = setCookie.split(';')[0];
+
+    const text = await res.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
+
+    return { status: res.status, body: json, text, raw: res };
+  };
+}
+
+const fixtures = {};
+
+async function seedFixtures() {
+  const hash = await bcrypt.hash(PASSWORD, 4); // low cost: this is a test
+
+  fixtures.account = await prisma.account.create({
+    data: { email: 'api@example.test', name: 'API Test', passwordHash: hash },
+  });
+  // A second account, existing only so "scoped to my account" can be disproved
+  // rather than assumed.
+  fixtures.other = await prisma.account.create({
+    data: { email: 'other@example.test', name: 'Someone Else', passwordHash: hash },
+  });
+
+  fixtures.contact = await prisma.contact.create({
+    data: { accountId: fixtures.account.id, name: 'Grandma', phone: '+15125550150' },
+  });
+  fixtures.caregiver = await prisma.contact.create({
+    data: { accountId: fixtures.account.id, name: 'Caregiver', phone: '+15125550160', role: 'CAREGIVER' },
+  });
+  fixtures.otherContact = await prisma.contact.create({
+    data: { accountId: fixtures.other.id, name: 'Not Yours', phone: '+15125550190' },
+  });
+  fixtures.message = await prisma.message.create({
+    data: { accountId: fixtures.account.id, name: 'Default', kind: 'TTS', ttsText: 'Take your pills.', isDefault: true },
+  });
+  fixtures.schedule = await prisma.schedule.create({
+    data: {
+      accountId: fixtures.account.id, name: 'Morning', dose: 'morning',
+      timeOfDay: '09:20', daysOfWeek: [1, 2, 3, 4, 5, 6],
+      contactId: fixtures.contact.id, escalationContactId: fixtures.caregiver.id,
+      messageId: fixtures.message.id,
+    },
+  });
+  fixtures.otherSchedule = await prisma.schedule.create({
+    data: {
+      accountId: fixtures.other.id, name: 'Not Yours', dose: 'evening',
+      timeOfDay: '21:20', daysOfWeek: [0], contactId: fixtures.otherContact.id,
+    },
+  });
+  await prisma.callHistory.createMany({
+    data: [
+      { accountId: fixtures.account.id, scheduleId: fixtures.schedule.id, contactId: fixtures.contact.id,
+        dose: 'morning', attempt: 1, outcome: 'CONFIRMED', startedAt: new Date('2026-08-01T14:20:00Z') },
+      { accountId: fixtures.account.id, scheduleId: fixtures.schedule.id, contactId: fixtures.contact.id,
+        dose: 'evening', attempt: 1, outcome: 'NO_ANSWER', startedAt: new Date('2026-08-02T02:20:00Z') },
+      { accountId: fixtures.other.id, scheduleId: fixtures.otherSchedule.id, contactId: fixtures.otherContact.id,
+        dose: 'morning', attempt: 1, outcome: 'CONFIRMED', startedAt: new Date('2026-08-02T14:20:00Z') },
+    ],
+  });
+}
+
+async function main() {
+  await assertScratchDatabase(prisma);
+  await truncateAll(prisma);
+  await prisma.session.deleteMany({});
+  await seedFixtures();
+  await start();
+
+  const api = makeClient();
+
+  // ── authentication ────────────────────────────────────────────────────────
+
+  section('everything is closed until you log in');
+  let r = await api('GET', '/api/me');
+  check('/api/me is 401', r.status, 401);
+  r = await api('GET', '/api/contacts');
+  check('contacts 401', r.status, 401);
+  r = await api('GET', '/api/schedules');
+  check('schedules 401', r.status, 401);
+  r = await api('GET', '/api/call-history');
+  check('call history 401', r.status, 401);
+  r = await api('POST', '/api/contacts', { name: 'X', phone: '+15125550001' });
+  check('writes 401 too', r.status, 401);
+
+  section('a bad password does not get in, and says nothing useful');
+  r = await api('POST', '/api/login', { email: 'api@example.test', password: 'wrong' });
+  check('401', r.status, 401);
+  check('same message whatever is wrong', r.body.error, 'Invalid email or password');
+  r = await api('POST', '/api/login', { email: 'nobody@example.test', password: PASSWORD });
+  check('unknown email is indistinguishable', r.body.error, 'Invalid email or password');
+
+  section('an account with no password set can never log in');
+  const noPassword = await prisma.account.create({ data: { email: 'nopass@example.test' } });
+  r = await api('POST', '/api/login', { email: 'nopass@example.test', password: '' });
+  check('empty password rejected', r.status, 400);
+  r = await api('POST', '/api/login', { email: 'nopass@example.test', password: 'anything' });
+  check('and so is any password', r.status, 401);
+  await prisma.account.delete({ where: { id: noPassword.id } });
+
+  section('logging in issues a session');
+  r = await api('POST', '/api/login', { email: 'api@example.test', password: PASSWORD });
+  check('200', r.status, 200);
+  check('returns the account', r.body.account.email, 'api@example.test');
+  check('never returns the hash', r.body.account.passwordHash, undefined);
+  contains('cookie is httpOnly', r.raw.headers.get('set-cookie'), 'HttpOnly');
+  contains('cookie is sameSite lax', r.raw.headers.get('set-cookie'), 'SameSite=Lax');
+
+  r = await api('GET', '/api/me');
+  check('/api/me now works', r.status, 200);
+  check('and knows who I am', r.body.account.email, 'api@example.test');
+  check('no hash here either', r.body.account.passwordHash, undefined);
+
+  // ── contacts ──────────────────────────────────────────────────────────────
+
+  section('contacts: list, create, update, delete');
+  r = await api('GET', '/api/contacts');
+  check('lists only my contacts', r.body.contacts.length, 2);
+  check('not the other account\'s', r.body.contacts.some(c => c.name === 'Not Yours'), false);
+
+  r = await api('POST', '/api/contacts', { name: 'Neighbour', phone: '+15125550170', role: 'CAREGIVER' });
+  check('created', r.status, 201);
+  const newContactId = r.body.contact.id;
+  check('stored as given', r.body.contact.phone, '+15125550170');
+
+  r = await api('PATCH', `/api/contacts/${newContactId}`, { name: 'Neighbour Pat' });
+  check('updated', r.status, 200);
+  check('name changed', r.body.contact.name, 'Neighbour Pat');
+  check('phone untouched by a partial update', r.body.contact.phone, '+15125550170');
+
+  r = await api('DELETE', `/api/contacts/${newContactId}`);
+  check('deleted', r.status, 204);
+  r = await api('GET', `/api/contacts/${newContactId}`);
+  check('and gone', r.status, 404);
+
+  section('contacts: validation, not a 500');
+  r = await api('POST', '/api/contacts', { name: 'Bad', phone: '5125550150' });
+  check('400 not 500', r.status, 400);
+  contains('names the field', JSON.stringify(r.body.details), 'phone');
+  contains('explains E.164', r.body.details.phone, 'E.164');
+
+  r = await api('POST', '/api/contacts', { phone: '+15125550111' });
+  check('missing name rejected', r.status, 400);
+  check('says which field', r.body.details.name, 'is required');
+
+  section('contacts: a duplicate phone is a 409, not a crash');
+  r = await api('POST', '/api/contacts', { name: 'Dup', phone: '+15125550150' });
+  check('409', r.status, 409);
+  contains('says why', r.body.error, 'already exists');
+
+  section('contacts: one still used by a schedule cannot be deleted');
+  r = await api('DELETE', `/api/contacts/${fixtures.contact.id}`);
+  check('409', r.status, 409);
+  check('and says which schedule', r.body.details.schedules[0].name, 'Morning');
+
+  // ── messages ──────────────────────────────────────────────────────────────
+
+  section('messages: TTS needs words, AUDIO needs a file');
+  r = await api('POST', '/api/messages', { name: 'Empty', kind: 'TTS' });
+  check('TTS without text rejected', r.status, 400);
+  check('says so', r.body.details.ttsText, 'is required when kind is TTS');
+
+  r = await api('POST', '/api/messages', { name: 'Bad audio', kind: 'AUDIO', audioUrl: 'http://example.com/a.mp3' });
+  check('plain http rejected', r.status, 400);
+  contains('wants https', r.body.details.audioUrl, 'https');
+
+  r = await api('POST', '/api/messages', { name: 'Evening', kind: 'TTS', ttsText: 'Evening pills.' });
+  check('created', r.status, 201);
+  const messageId = r.body.message.id;
+
+  section('messages: making one default unsets the previous one');
+  r = await api('PATCH', `/api/messages/${messageId}`, { isDefault: true });
+  check('200', r.status, 200);
+  check('is now default', r.body.message.isDefault, true);
+  const oldDefault = await prisma.message.findUnique({ where: { id: fixtures.message.id } });
+  check('the old one is not', oldDefault.isDefault, false);
+
+  // ── schedules ─────────────────────────────────────────────────────────────
+
+  section('schedules: the constraints that matter are 400s');
+  const validSchedule = {
+    name: 'Test', dose: 'morning', timeOfDay: '09:20', daysOfWeek: [1, 2, 3],
+    contactId: fixtures.contact.id, escalationContactId: fixtures.caregiver.id,
+  };
+
+  r = await api('POST', '/api/schedules', { ...validSchedule, daysOfWeek: [] });
+  check('empty daysOfWeek rejected', r.status, 400);
+  contains('explains', r.body.details.daysOfWeek, 'between 1 and 7');
+
+  r = await api('POST', '/api/schedules', { ...validSchedule, daysOfWeek: [1, 1, 2] });
+  check('duplicate days rejected', r.status, 400);
+
+  r = await api('POST', '/api/schedules', { ...validSchedule, daysOfWeek: [0, 7] });
+  check('day 7 rejected', r.status, 400);
+
+  r = await api('POST', '/api/schedules', { ...validSchedule, timeOfDay: '9:20' });
+  check('H:MM rejected', r.status, 400);
+  r = await api('POST', '/api/schedules', { ...validSchedule, timeOfDay: '25:00' });
+  check('25:00 rejected', r.status, 400);
+
+  r = await api('POST', '/api/schedules', { ...validSchedule, timezone: 'America/Nowhere' });
+  check('unknown timezone rejected', r.status, 400);
+  contains('names IANA', r.body.details.timezone, 'IANA');
+
+  r = await api('POST', '/api/schedules', { ...validSchedule, dose: 'lunchtime' });
+  check('unknown dose rejected', r.status, 400);
+
+  r = await api('POST', '/api/schedules', { ...validSchedule, escalationAckMinutes: 0 });
+  check('ack window below 1 rejected', r.status, 400);
+
+  section('schedules: a schedule that alerts nobody is refused');
+  r = await api('POST', '/api/schedules', { ...validSchedule, escalateWithCall: false, escalateWithSms: false });
+  check('400', r.status, 400);
+  contains('explains the consequence', JSON.stringify(r.body.details), 'nobody is told');
+
+  section('schedules: cannot borrow another account\'s contact');
+  r = await api('POST', '/api/schedules', { ...validSchedule, contactId: fixtures.otherContact.id });
+  check('400', r.status, 400);
+  check('reads as no such contact', r.body.details.contactId, 'no such contact');
+
+  section('schedules: create, toggle, delete');
+  r = await api('POST', '/api/schedules', validSchedule);
+  check('created', r.status, 201);
+  const scheduleId = r.body.schedule.id;
+  check('enabled by default', r.body.schedule.enabled, true);
+  check('relations came back', r.body.schedule.contact.name, 'Grandma');
+
+  r = await api('POST', `/api/schedules/${scheduleId}/enabled`, { enabled: false });
+  check('disabled', r.status, 200);
+  check('reflected', r.body.schedule.enabled, false);
+  r = await api('POST', `/api/schedules/${scheduleId}/enabled`, { enabled: 'no' });
+  check('non-boolean rejected', r.status, 400);
+
+  r = await api('DELETE', `/api/schedules/${scheduleId}`);
+  check('deleted', r.status, 204);
+
+  // ── call history ──────────────────────────────────────────────────────────
+
+  section('call history: read-only, paginated, filterable');
+  r = await api('GET', '/api/call-history');
+  check('200', r.status, 200);
+  check('only my rows', r.body.callHistory.length, 2);
+  check('total agrees', r.body.pagination.total, 2);
+  check('hasMore false', r.body.pagination.hasMore, false);
+
+  r = await api('GET', '/api/call-history?limit=1');
+  check('paginates', r.body.callHistory.length, 1);
+  check('hasMore true', r.body.pagination.hasMore, true);
+  check('newest first', r.body.callHistory[0].dose, 'evening');
+
+  r = await api('GET', '/api/call-history?limit=1&offset=1');
+  check('offset works', r.body.callHistory[0].dose, 'morning');
+
+  r = await api('GET', '/api/call-history?dose=morning');
+  check('filters by dose', r.body.callHistory.length, 1);
+
+  r = await api(`GET`, `/api/call-history?from=2026-08-02T00:00:00Z`);
+  check('filters by date', r.body.callHistory.length, 1);
+  r = await api(`GET`, `/api/call-history?contactId=${fixtures.contact.id}`);
+  check('filters by contact', r.body.callHistory.length, 2);
+
+  r = await api('GET', '/api/call-history?limit=0');
+  check('limit 0 rejected', r.status, 400);
+  r = await api('GET', '/api/call-history?limit=5000');
+  check('unbounded limit rejected', r.status, 400);
+  r = await api('GET', '/api/call-history?from=banana');
+  check('bad date rejected', r.status, 400);
+
+  r = await api('POST', '/api/call-history', { dose: 'morning' });
+  check('there is no way to write history', r.status, 404);
+
+  // ── the case this suite exists for ────────────────────────────────────────
+
+  section('ANOTHER ACCOUNT\'S ROWS ARE NOT REACHABLE, EVEN BY ID');
+  r = await api('GET', `/api/contacts/${fixtures.otherContact.id}`);
+  check('read → 404', r.status, 404);
+  r = await api('PATCH', `/api/contacts/${fixtures.otherContact.id}`, { name: 'Hijacked' });
+  check('update → 404', r.status, 404);
+  r = await api('DELETE', `/api/contacts/${fixtures.otherContact.id}`);
+  check('delete → 404', r.status, 404);
+  r = await api('GET', `/api/schedules/${fixtures.otherSchedule.id}`);
+  check('schedule read → 404', r.status, 404);
+  r = await api('POST', `/api/schedules/${fixtures.otherSchedule.id}/enabled`, { enabled: false });
+  check('schedule toggle → 404', r.status, 404);
+  r = await api('DELETE', `/api/schedules/${fixtures.otherSchedule.id}`);
+  check('schedule delete → 404', r.status, 404);
+
+  // 404 has to mean "nothing happened", not "nothing was returned".
+  const untouched = await prisma.contact.findUnique({ where: { id: fixtures.otherContact.id } });
+  check('the other contact still exists', Boolean(untouched), true);
+  check('and was not renamed', untouched.name, 'Not Yours');
+  const otherSchedule = await prisma.schedule.findUnique({ where: { id: fixtures.otherSchedule.id } });
+  check('the other schedule still exists', Boolean(otherSchedule), true);
+  check('and is still enabled', otherSchedule.enabled, true);
+
+  // ── logout ────────────────────────────────────────────────────────────────
+
+  section('logging out ends the session server-side');
+  const sessionsBefore = await prisma.session.count();
+  check('a session row existed', sessionsBefore > 0, true);
+
+  r = await api('POST', '/api/logout');
+  check('200', r.status, 200);
+  r = await api('GET', '/api/me');
+  check('/api/me is 401 again', r.status, 401);
+  r = await api('GET', '/api/contacts');
+  check('and so is everything else', r.status, 401);
+
+  section('unknown API paths are JSON, not HTML');
+  r = await api('GET', '/api/nope');
+  check('404', r.status, 404);
+  check('json body', r.body.error, 'No such endpoint');
+
+  await new Promise((resolve) => server.close(resolve));
+  await prisma.session.deleteMany({});
+  await truncateAll(prisma);
+
+  process.exitCode = summary() ? 1 : 0;
+}
+
+main()
+  .catch((e) => { console.error('FAILED:', e); process.exitCode = 1; })
+  .finally(async () => {
+    if (server) server.close();
+    await db.disconnect();
+  });

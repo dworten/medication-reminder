@@ -64,4 +64,76 @@ async function claimForFire(scheduleId, now, windowMs) {
   return result.count === 1;
 }
 
-module.exports = { listEnabled, getById, claimForFire, WITH_RELATIONS };
+// ─── Account-scoped access for the API (Phase 3) ─────────────────────────────
+//
+// Separate names rather than an extra argument on the functions above: those
+// are called from the live call path — callManager, twimlHandler, the scheduler
+// — and changing their signatures to serve the API would put the reminder flow
+// at risk for the sake of tidiness.
+//
+// Writes filter on accountId inside updateMany/deleteMany so a foreign id
+// matches zero rows instead of modifying someone else's schedule.
+
+async function listForAccount(accountId) {
+  return db.getClient().schedule.findMany({
+    where:   { accountId },
+    include: WITH_RELATIONS,
+    orderBy: [{ timeOfDay: 'asc' }, { name: 'asc' }],
+  });
+}
+
+async function getForAccount(accountId, id) {
+  const rows = await db.getClient().schedule.findMany({
+    where:   { id, accountId },
+    include: WITH_RELATIONS,
+    take:    1,
+  });
+  return rows[0] || null;
+}
+
+async function createForAccount(accountId, data) {
+  const created = await db.getClient().schedule.create({ data: { ...data, accountId } });
+  return getForAccount(accountId, created.id);
+}
+
+async function updateForAccount(accountId, id, data) {
+  const result = await db.getClient().schedule.updateMany({ where: { id, accountId }, data });
+  if (result.count === 0) return null;
+  return getForAccount(accountId, id);
+}
+
+async function removeForAccount(accountId, id) {
+  const result = await db.getClient().schedule.deleteMany({ where: { id, accountId } });
+  return result.count === 1;
+}
+
+// enabled is its own endpoint because it is the one field someone reaches for
+// in a hurry — pausing the calls while she is in hospital, say — and it should
+// not require sending back a whole schedule to do it.
+//
+// last_fired_at is deliberately untouched: it is the double-call guard, and
+// clearing it could re-fire a call that already went out today.
+async function setEnabled(accountId, id, enabled) {
+  const result = await db.getClient().schedule.updateMany({
+    where: { id, accountId },
+    data:  { enabled },
+  });
+  if (result.count === 0) return null;
+  return getForAccount(accountId, id);
+}
+
+// Confirms a contact or message belongs to this account before it is attached
+// to a schedule. Without it, a caller could point their schedule at another
+// account's contact — the foreign key only checks that the row exists, not
+// whose it is.
+async function belongsToAccount(model, accountId, id) {
+  if (!id) return true;
+  const count = await db.getClient()[model].count({ where: { id, accountId } });
+  return count === 1;
+}
+
+module.exports = {
+  listEnabled, getById, claimForFire, WITH_RELATIONS,
+  listForAccount, getForAccount, createForAccount, updateForAccount, removeForAccount,
+  setEnabled, belongsToAccount,
+};

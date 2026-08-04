@@ -300,6 +300,43 @@ async function currentOutcome(id) {
   return row ? row.outcome : null;
 }
 
+// ─── Account-scoped reads for the API (Phase 3) ──────────────────────────────
+//
+// Read-only by design: call_history is the record of what actually happened, so
+// the API exposes no way to edit or delete it. Rows are written by the call
+// path alone.
+
+async function listForAccount(accountId, { limit = 50, offset = 0, from, to, contactId, dose } = {}) {
+  const where = {
+    accountId,
+    ...(contactId && { contactId }),
+    ...(dose && { dose }),
+    ...((from || to) && {
+      startedAt: {
+        ...(from && { gte: from }),
+        ...(to   && { lte: to }),
+      },
+    }),
+  };
+
+  const client = db.getClient();
+
+  // Count and page in one round trip. The total is what lets a UI say "showing
+  // 50 of 312" rather than guessing whether another page exists.
+  const [total, rows] = await client.$transaction([
+    client.callHistory.count({ where }),
+    client.callHistory.findMany({
+      where,
+      include: { contact: true, schedule: { select: { id: true, name: true, dose: true } } },
+      orderBy: { startedAt: 'desc' },
+      take:    limit,
+      skip:    offset,
+    }),
+  ]);
+
+  return { total, rows, limit, offset };
+}
+
 async function countPendingWork() {
   return db.getClient().callHistory.count({ where: { nextRetryAt: { not: null } } });
 }
@@ -309,5 +346,5 @@ module.exports = {
   scheduleRetry, findDueWork, claimWork, completeWork, releaseClaim,
   enqueueEscalation, countPendingWork, SWEEP_INCLUDE,
   findChildByKind, chainFrom, cancelWork, makeDueNow, currentOutcome,
-  recordDestination,
+  recordDestination, listForAccount,
 };

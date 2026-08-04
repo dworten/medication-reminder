@@ -43,7 +43,16 @@ function safeEquals(a, b) {
 
 // /trigger places real, billable calls on demand, so it needs its own guard —
 // Twilio never calls it, so there is no signature to check.
+//
+// Two ways in, since Phase 3. A logged-in session is the browser's route: the
+// UI will have a "call now" button and should not need to know the shared
+// secret. The X-Trigger-Secret header stays for curl and for anything holding
+// only the secret, so existing testing is unaffected.
 function requireTriggerSecret(req, res, next) {
+  // Checked first because it is free — no constant-time comparison needed for
+  // a session id express-session has already verified the signature of.
+  if (req.session && req.session.accountId) return next();
+
   if (!config.triggerSecret) {
     // No secret configured: allow in mock mode (nothing real happens), refuse in
     // live mode rather than leaving an open "call grandma" button on the internet.

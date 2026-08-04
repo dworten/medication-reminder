@@ -75,11 +75,37 @@ enum CallOutcome {
 
 // ─── Tables ───────────────────────────────────────────────────────────────────
 
+// Login sessions, written and read by connect-pg-simple rather than by Prisma.
+//
+// Modelled here anyway so `prisma migrate` stays the single source of truth for
+// the schema — a table created behind Prisma's back shows up as drift forever
+// after. The column names and types are the ones connect-pg-simple expects and
+// are not ours to rename.
+//
+// Sessions live in Postgres rather than in memory because the default
+// MemoryStore drops every login on redeploy, and this app redeploys often.
+model Session {
+  sid    String   @id
+  sess   Json     @db.Json
+  expire DateTime @db.Timestamp(6)
+
+  @@index([expire])
+  @@map("session")
+}
+
 model Account {
   id        String   @id @default(uuid()) @db.Uuid
   email     String   @unique
   name      String?
   timezone  String   @default("America/Chicago")
+
+  // Set by `npm run set-password`, never by a signup flow — there is one
+  // account and it is created by the seed. Nullable on purpose: an account that
+  // has never had a password set must not be loginable, and NULL is the only
+  // state that cannot be matched by any hash comparison.
+  passwordHash String?   @map("password_hash")
+  lastLoginAt  DateTime? @map("last_login_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

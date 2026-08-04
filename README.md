@@ -15,7 +15,9 @@ Call times, contacts, messages and escalation settings all live in **PostgreSQL*
 ## Architecture
 
 ```
-app.js              Express server, /trigger, /health, --test CLI, graceful shutdown
+app.js              Express server, /trigger, /health, /login, --test CLI, shutdown
+public/
+  login.html        Minimal sign-in page — proves the session works, nothing more
 railway.json        Railway build/deploy config (healthcheck, single replica)
 prisma.config.js    Prisma CLI config — connection URL + .env loading (Prisma 7)
 prisma/
@@ -24,7 +26,15 @@ prisma/
   seed.js           Creates the account, contacts, message and schedules (idempotent)
 scripts/
   history.js        `npm run db:history` — recent attempts, escalation chains indented
+  set-password.js   `npm run set-password` — the only way an account gets one
 src/
+  session.js        Session cookie config, Postgres-backed store
+  api/
+    index.js        Mounts the routers; auth boundary lives here
+    auth.js         /login /logout /me, plus the requireAuth guard
+    validate.js     Input rules, mirroring the database's CHECK constraints
+    errors.js       One error shape; Prisma failures → the right HTTP status
+    contacts.js  messages.js  schedules.js  callHistory.js
   db.js             Shared PrismaClient (lazy; the app boots without a database)
   generated/prisma  Generated client — gitignored, rebuilt by `prisma generate`
   config.js         Env → config, resolves BASE_URL, validates at boot
@@ -496,8 +506,68 @@ DATABASE_URL='postgresql://postgres:PASSWORD@HOST:PORT/medication_reminder_test'
 
 ---
 
-## Known limitations (Phase 3)
+## API
 
-- **No API and no UI.** Data is managed with `prisma/seed.js` and Prisma Studio. `src/data/` is the seam an HTTP layer sits on: every query the call path needs is already there, account-scoped, with relations loaded in one round trip.
-- **No auth.** The schema is multi-tenant — every table carries `account_id` — but there is one account and nothing checks who is asking.
-- **`escalate_with_call` is off by default,** so the fallback-call step ships unused until you turn it on for a schedule. The path is covered by tests, but it has not rung a real phone.
+Session-authenticated JSON, everything scoped to the logged-in account.
+
+```
+POST   /api/login                  { email, password } → { account }
+POST   /api/logout
+GET    /api/me                     → { account }   — how a frontend checks auth state
+
+GET    /api/contacts               POST /api/contacts
+GET    /api/contacts/:id           PATCH /api/contacts/:id     DELETE /api/contacts/:id
+GET    /api/messages               POST /api/messages
+GET    /api/messages/:id           PATCH /api/messages/:id     DELETE /api/messages/:id
+GET    /api/schedules              POST /api/schedules
+GET    /api/schedules/:id          PATCH /api/schedules/:id    DELETE /api/schedules/:id
+POST   /api/schedules/:id/enabled  { enabled: true|false }
+
+GET    /api/call-history?limit=&offset=&from=&to=&contactId=&dose=
+```
+
+`call_history` is **read-only** — there is no POST, PATCH or DELETE. It records calls placed to a real person about real medication, and an API that can rewrite it is an API that can hide a missed dose.
+
+### Account scoping
+
+Every write goes through `updateMany`/`deleteMany` filtered on `{ id, accountId }`, never `update({ where: { id } })`. A request carrying another account's row id therefore matches **zero rows and returns 404** rather than succeeding against data that isn't yours. That is the property that makes a second user an addition rather than an audit of every query, and the API suite proves it by asserting the other account's rows are unchanged afterwards — a 404 has to mean nothing happened, not merely that nothing was returned.
+
+### Validation
+
+Input rules mirror the database's CHECK constraints, so a bad payload is a 400 naming the field rather than a 500 from a constraint violation:
+
+```json
+{ "error": "Validation failed",
+  "details": { "phone": "must be E.164 format — a plus, country code and number, e.g. +15125550123" } }
+```
+
+Phone numbers must be E.164, times `HH:MM`, `daysOfWeek` 1–7 unique days in 0–6, and timezones must resolve through `Intl.DateTimeFormat` — a plain string check would accept `US/Central-ish` and fail at 9:20. Prisma errors are translated too: `P2002` → 409, `P2003` → 409, `P2025` → 404, CHECK violations → 400.
+
+Two rules exist only because the database cannot express them: a schedule may not have *both* escalation steps off (nobody would be told about a missed dose), and its contact and message must belong to the same account — a foreign key proves a row exists, not whose it is.
+
+---
+
+## Authentication
+
+Session cookie, `httpOnly` + `SameSite=Lax` + `Secure` in production, signed with `SESSION_SECRET`. Sessions live in Postgres, not memory, so a redeploy does not sign you out — the same reasoning that moved retries out of `setTimeout`.
+
+```bash
+npm run set-password                  # the only account
+npm run set-password -- you@mail.com  # a specific one
+```
+
+The password is typed, never passed as an argument — an argument lands in shell history and the process list. There is no signup flow: the account row comes from the seed, and this is the only way it gets a password. **Until you run it, every login returns 401** — an account with a `NULL` password hash is deliberately not loginable.
+
+Sign in at `/login`. It's intentionally plain; it exists to prove the session works.
+
+**What stays public:** `/webhook/*` keeps its Twilio signature validation and never sees the session middleware at all — Twilio cannot log in, and a live call takes exactly the path it did before auth existed. `/trigger` now accepts **either** a session cookie or the `X-Trigger-Secret` header, so existing curl testing is unaffected.
+
+Login is rate-limited to 10 attempts per IP per 15 minutes. That counter is in memory, so it resets on redeploy — it slows an attacker rather than locking them out, which is the right trade for a single-user app behind a long password.
+
+---
+
+## Known limitations (Phase 3, later steps)
+
+- **No UI yet** beyond the login page. `/api` is the foundation the interface will sit on.
+- **Single user.** The schema and every query are already account-scoped; what's missing is a way to create a second account, not the isolation.
+- **`escalate_with_call`** now runs in production, but had not rung a real phone as of first deploy.

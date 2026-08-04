@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medication Reminder — Sign in</title>
+<style>
+  /* Deliberately plain. This page exists to prove the session works; the real
+     interface is the next step and will not inherit from here. */
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: grid; place-items: center;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: Canvas; color: CanvasText;
+  }
+  main { width: min(22rem, calc(100vw - 2rem)); }
+  h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+  p.sub { margin: 0 0 1.5rem; opacity: .7; font-size: .875rem; }
+  label { display: block; font-size: .8125rem; font-weight: 600; margin-bottom: .25rem; }
+  input {
+    width: 100%; padding: .5rem .625rem; margin-bottom: 1rem;
+    font: inherit; color: inherit;
+    background: Canvas; border: 1px solid GrayText; border-radius: .375rem;
+  }
+  input:focus-visible { outline: 2px solid Highlight; outline-offset: 1px; }
+  button {
+    width: 100%; padding: .5rem; font: inherit; font-weight: 600;
+    color: Canvas; background: CanvasText;
+    border: 0; border-radius: .375rem; cursor: pointer;
+  }
+  button[disabled] { opacity: .6; cursor: default; }
+  #msg { margin-top: 1rem; font-size: .875rem; min-height: 1.5em; }
+  #msg[data-kind="error"] { color: #d33; }
+  #msg[data-kind="ok"]    { color: #2a7; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Medication Reminder</h1>
+  <p class="sub">Sign in to manage schedules and contacts.</p>
+
+  <form id="f" novalidate>
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+    <button id="submit" type="submit">Sign in</button>
+  </form>
+
+  <!-- aria-live so the result is announced, not just shown -->
+  <p id="msg" role="status" aria-live="polite"></p>
+</main>
+
+<script>
+  const form   = document.getElementById('f');
+  const button = document.getElementById('submit');
+  const msg    = document.getElementById('msg');
+
+  function say(text, kind) {
+    msg.textContent = text;
+    msg.dataset.kind = kind || '';
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    say('Signing in…');
+
+    try {
+      const response = await fetch('/api/login', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // The session cookie is httpOnly, so it is never touched by this script
+        // — the browser stores and returns it on its own.
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          email:    document.getElementById('email').value,
+          password: document.getElementById('password').value,
+        }),
+      });
+
+      const body = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        say(body.error || 'Sign in failed', 'error');
+        button.disabled = false;
+        return;
+      }
+
+      // No UI to land on yet, so prove the session round-trips instead: this
+      // call carries only the cookie.
+      const me = await fetch('/api/me', { credentials: 'same-origin' });
+      const who = await me.json();
+
+      say('Signed in as ' + who.account.email + ' — session confirmed via /api/me.', 'ok');
+      form.reset();
+      button.disabled = false;
+    } catch (err) {
+      say('Could not reach the server: ' + err.message, 'error');
+      button.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

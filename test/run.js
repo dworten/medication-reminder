@@ -18,6 +18,7 @@ const SUITES = [
   ['twiml',         'twiml.test.js',         'needs DATABASE_URL'],
   ['sweeper',       'sweeper.test.js',       'needs DATABASE_URL'],
   ['escalation',    'escalation.test.js',    'needs DATABASE_URL'],
+  ['api',           'api.test.js',           'needs DATABASE_URL'],
 ];
 
 let failed = 0;
