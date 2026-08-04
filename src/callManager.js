@@ -64,6 +64,10 @@ async function initiateCall(dose, attempt, options = {}) {
         accountId,
         scheduleId: schedule ? schedule.id : null,
         contactId:  schedule && schedule.contact ? schedule.contact.id : null,
+        // Who it is about, and where it actually went. They differ whenever the
+        // destination is overridden, and the retry needs the latter — otherwise
+        // a /trigger?target=test call changes phones halfway through.
+        toPhone:    to,
         dose,
         attempt,
       });
@@ -517,6 +521,7 @@ async function deliverEscalation(row) {
   );
   const sid = await smsAlert.send(to, body);
 
+  await callHistoryRepo.recordDestination(row.id, to);
   await callHistoryRepo.recordOutcome(row.id, 'SENT');
   if (sid) await callHistoryRepo.attachCallSid(row.id, sid);
 
@@ -611,6 +616,7 @@ async function deliverEscalationCall(row) {
   });
 
   await callHistoryRepo.attachCallSid(row.id, call.sid);
+  await callHistoryRepo.recordDestination(row.id, to);
   logger.call('Escalation call placed', { sid: call.sid, callHistoryId: row.id, to });
 }
 

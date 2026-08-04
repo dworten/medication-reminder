@@ -26,7 +26,7 @@ callManager.initiateCall = async (dose, attempt, options = {}) => {
     contactId:  options.schedule && options.schedule.contact ? options.schedule.contact.id : null,
     dose, attempt,
   });
-  placed.push({ dose, attempt, id: row && row.id });
+  placed.push({ dose, attempt, id: row && row.id, to: options.to });
   return 'FAKE_CALL_SID';
 };
 
@@ -63,12 +63,13 @@ async function seedFixtures() {
 }
 
 // A call attempt that went unanswered and owes a retry.
-async function queueRetry({ attempt = 1, dueAt = new Date(Date.now() - 1000), startedAt = null } = {}) {
+async function queueRetry({ attempt = 1, dueAt = new Date(Date.now() - 1000), startedAt = null, toPhone } = {}) {
   const row = await prisma.callHistory.create({
     data: {
       accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
       contactId: fixtures.contact.id, dose: 'morning', attempt,
       kind: 'REMINDER_CALL', outcome: 'NO_ANSWER', nextRetryAt: dueAt,
+      ...(toPhone !== undefined && { toPhone }),
       ...(startedAt && { startedAt }),
     },
   });
@@ -284,6 +285,27 @@ async function main() {
   check('no retry queued on the final attempt', finalRow.nextRetryAt, null);
   const esc = await prisma.callHistory.findFirst({ where: { kind: 'ESCALATION_SMS' } });
   check('escalation queued instead', Boolean(esc), true);
+
+  section('a retry rings the number the first attempt actually used');
+  // The /trigger?target=test case. The destination was overridden, so the retry
+  // must follow it rather than rebuilding from the contact — otherwise a test
+  // call rings the test phone and its retry rings the real person.
+  await truncateAll(prisma); await seedFixtures();
+  placed = [];
+  await queueRetry({ attempt: 1, toPhone: '+15125559999' });
+  result = await sweeper.runOnce();
+  check('the retry fired', placed.length, 1);
+  check('to the redirected number', placed[0].to, '+15125559999');
+  check('not the schedule contact', placed[0].to === fixtures.contact.phone, false);
+
+  section('with no recorded destination it falls back to the contact');
+  // Rows written before to_phone existed, and anything queued without one.
+  await truncateAll(prisma); await seedFixtures();
+  placed = [];
+  await queueRetry({ attempt: 1, toPhone: null });
+  result = await sweeper.runOnce();
+  check('the retry fired', placed.length, 1);
+  check('to the contact', placed[0].to, fixtures.contact.phone);
 
   // ── answered, but nothing confirmed ──────────────────────────────────────
   //

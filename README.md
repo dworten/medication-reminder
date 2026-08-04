@@ -292,6 +292,14 @@ curl -X POST "https://YOUR-APP.up.railway.app/trigger?dose=morning&target=test" 
 
 Use `target=test` to call `TEST_PHONE_NUMBER` (your own phone) instead of your grandmother. Drop `&target=test` when you're ready for the real thing.
 
+**The redirect holds for the whole sequence, retries included.** Each attempt records the number it actually dialled in `call_history.to_phone`, and the sweeper retries *that* number rather than rebuilding it from the schedule's contact. Without it a test call rang the test phone on the first attempt and the real contact on the retry — with nothing in the history to show it had happened, because `contact_id` records who a call was *about*, not where it went. `npm run db:history` now marks a redirected attempt explicitly:
+
+```
+XX  Aug 04, 04:46  CALL  morning  try 1  NOT_CONFIRMED  Grandma → +1512…9999 (redirected)
+```
+
+Escalation steps are unaffected: those always go to the schedule's escalation contact, so a test call that runs to exhaustion still alerts the **real** caregiver.
+
 Watch Railway's **Deploy Logs** and the Twilio Console call log to confirm the full flow: call placed → `/webhook/initial` → your keypad response → `/webhook/response` → goodbye.
 
 ### Railway settings to be aware of

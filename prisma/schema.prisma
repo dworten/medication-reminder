@@ -208,6 +208,17 @@ model CallHistory {
   repromptCount Int   @default(0) @map("reprompt_count")
   outcome CallOutcome @default(PENDING)
 
+  // The number this attempt was actually dialled at (or texted).
+  //
+  // contact_id says who the attempt was ABOUT; this says where it went, and the
+  // two differ whenever a destination is overridden — /trigger?target=test being
+  // the case that matters. Without it the retry rebuilt the destination from the
+  // contact, so a test call's first attempt rang the test phone and its retry
+  // rang the real contact partway through the sequence.
+  //
+  // Nullable: rows written before this column existed fall back to the contact.
+  toPhone String? @map("to_phone")
+
   // Twilio's Call SID (or Message SID for ESCALATION_SMS). Unique when set;
   // Postgres allows many NULLs under a unique constraint, which is what we want
   // for rows created before the API call returns.

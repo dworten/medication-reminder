@@ -41,8 +41,20 @@ function when(date) {
   });
 }
 
+// Who it was about, and where it actually went. Showing only the contact hid
+// redirected calls entirely: a /trigger?target=test attempt read as though it
+// had rung the contact.
+function destination(row) {
+  const name  = row.contact ? row.contact.name : '(no contact)';
+  const onFile = row.contact ? row.contact.phone : null;
+
+  if (!row.toPhone)        return `${name} ${onFile || ''}`.trim();
+  if (row.toPhone === onFile) return `${name} ${row.toPhone}`;
+  return `${name} → ${row.toPhone} (redirected)`;
+}
+
 function describe(row, indent) {
-  const who  = row.contact ? `${row.contact.name} ${row.contact.phone}` : '(no contact)';
+  const who  = destination(row);
   const kind = row.kind.replace('ESCALATION_', 'ESC ').replace('REMINDER_CALL', 'CALL');
 
   const bits = [

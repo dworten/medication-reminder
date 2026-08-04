@@ -70,7 +70,12 @@ async function _fireRetry(row, now) {
 
   await callManager.initiateCall(row.dose, nextAttempt, {
     schedule: row.schedule || null,
-    to:       row.contact ? row.contact.phone : undefined,
+    // The number the previous attempt actually rang, not the contact's current
+    // one. A retry has to reach the same phone the sequence started on, or a
+    // /trigger?target=test call rings the test phone and then jumps to the real
+    // contact. Falls back to the contact for rows written before to_phone
+    // existed, and for anything queued without a destination.
+    to:       row.toPhone || (row.contact ? row.contact.phone : undefined),
   });
 }
 

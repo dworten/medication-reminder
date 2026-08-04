@@ -22,19 +22,29 @@ async function _try(label, fn) {
 
 // Opens a row the moment a call is attempted, before Twilio is contacted, so a
 // call that throws still leaves evidence it was tried.
-async function startAttempt({ accountId, scheduleId, contactId, dose, attempt, kind = 'REMINDER_CALL' }) {
+async function startAttempt({ accountId, scheduleId, contactId, dose, attempt, toPhone, kind = 'REMINDER_CALL' }) {
   return _try('startAttempt', (p) =>
     p.callHistory.create({
       data: {
         accountId,
         scheduleId: scheduleId || null,
         contactId:  contactId  || null,
+        toPhone:    toPhone    || null,
         dose,
         attempt,
         kind,
         outcome: 'PENDING',
       },
     })
+  );
+}
+
+// Where an escalation actually went. Unlike a reminder call the destination is
+// only known at delivery time, so it is recorded then rather than at creation.
+async function recordDestination(id, toPhone) {
+  if (!id || !toPhone) return null;
+  return _try('recordDestination', (p) =>
+    p.callHistory.update({ where: { id }, data: { toPhone } })
   );
 }
 
@@ -300,4 +310,5 @@ module.exports = {
   scheduleRetry, findDueWork, claimWork, completeWork, releaseClaim, hasAttempt,
   enqueueEscalation, countPendingWork, SWEEP_INCLUDE,
   findChildByKind, chainFrom, cancelWork, makeDueNow, currentOutcome,
+  recordDestination,
 };
