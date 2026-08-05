@@ -37,17 +37,51 @@ app.use('/webhook', twimlRouter);
 
 // Sessions, only where they are needed. /trigger is included because it accepts
 // a logged-in session as an alternative to the shared secret.
-app.use(['/api', '/login', '/trigger'], session.middleware());
+app.use(['/api', '/login', '/app', '/trigger'], session.middleware());
 
 // The API. A router, so app.js keeps owning the process and nothing else here
 // has to change.
 app.use('/api', apiRouter());
 
-// Minimal sign-in page. The real interface is the next step.
-app.get('/login', (_req, res) => {
+// Sign-in page. Already-authenticated visitors go straight through rather than
+// being asked to log in again.
+app.get('/login', (req, res) => {
+  if (req.session && req.session.accountId) return res.redirect('/app');
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
+// The interface.
+//
+// Gated at the route, not just by the API it calls. The markup names contacts
+// and schedules, so serving it to anyone who asks would leak who gets called
+// even if every fetch it makes came back 401. A page redirects rather than
+// returning JSON — a browser following a link wants somewhere to go.
+function requirePage(req, res, next) {
+  if (req.session && req.session.accountId) return next();
+  return res.redirect('/login');
+}
+
+// The shell is served explicitly, and BEFORE the static mount. Left to
+// express.static, a request for /app is a directory and answers 301 → /app/,
+// which works but wastes a round trip and means the route below never runs.
+// Client-side routing lives in the hash, so this is the only HTML there is.
+app.get(['/app', '/app/'], requirePage, (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'app', 'index.html'));
+});
+
+// index:false and redirect:false leave directory handling to the route above
+// rather than having two things answer for the same path.
+app.use('/app', requirePage, express.static(path.join(__dirname, 'public', 'app'), {
+  index:    false,
+  redirect: false,
+}));
+
+// Always to /login, which then forwards to /app if there is a session.
+//
+// It cannot decide that itself: the session middleware is mounted on specific
+// paths so Twilio's webhooks never touch it, and '/' as a mount path would
+// match every request including those. One extra redirect is a fair price for
+// keeping the call path clear of session lookups.
 app.get('/', (_req, res) => res.redirect('/login'));
 
 // Manual trigger: POST /trigger?dose=morning  (or body: { "dose": "morning" })

@@ -1,0 +1,201 @@
+/* Mobile-first. This gets checked on a phone far more often than at a desk, so
+   the small layout is the real one and the wide screen is the adjustment. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg:        Canvas;
+  --fg:        CanvasText;
+  --muted:     color-mix(in srgb, CanvasText 55%, Canvas);
+  --line:      color-mix(in srgb, CanvasText 18%, Canvas);
+  --raised:    color-mix(in srgb, CanvasText 4%, Canvas);
+  --accent:    #2563eb;
+  --ok:        #15803d;
+  --warn:      #b45309;
+  --bad:       #b91c1c;
+  --radius:    .5rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  /* Space for the fixed tab bar on small screens. */
+  padding-bottom: 4.5rem;
+}
+
+/* ── Chrome ─────────────────────────────────────────────────────────────── */
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: .75rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 700; text-decoration: none; color: inherit; }
+.topbar-right { display: flex; align-items: center; gap: .75rem; }
+.whoami { font-size: .8125rem; color: var(--muted); }
+@media (max-width: 30rem) { .whoami { display: none; } }
+
+.link-button {
+  background: none; border: 0; padding: 0;
+  font: inherit; font-size: .8125rem; color: var(--accent);
+  text-decoration: underline; cursor: pointer;
+}
+
+/* Tabs sit at the bottom on a phone — thumb reach — and under the header on a
+   wider screen. */
+.tabs {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
+  display: flex; background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+.tabs a {
+  flex: 1; padding: .75rem .25rem;
+  text-align: center; text-decoration: none;
+  font-size: .75rem; color: var(--muted);
+  border-top: 2px solid transparent;
+}
+.tabs a[aria-current="page"] { color: var(--fg); font-weight: 600; border-top-color: var(--accent); }
+
+@media (min-width: 40rem) {
+  body { padding-bottom: 0; }
+  .tabs {
+    position: static; border-top: 0; border-bottom: 1px solid var(--line);
+    padding: 0 1rem; gap: .5rem;
+  }
+  .tabs a {
+    flex: 0 0 auto; padding: .625rem .75rem; font-size: .875rem;
+    border-top: 0; border-bottom: 2px solid transparent;
+  }
+  .tabs a[aria-current="page"] { border-bottom-color: var(--accent); }
+}
+
+main { padding: 1rem; max-width: 52rem; margin: 0 auto; }
+
+/* ── Type ───────────────────────────────────────────────────────────────── */
+
+h1 { font-size: 1.375rem; margin: 0 0 .25rem; }
+h2 { font-size: 1rem; margin: 1.75rem 0 .625rem; }
+.sub { margin: 0 0 1.25rem; color: var(--muted); font-size: .875rem; }
+.muted { color: var(--muted); }
+.small { font-size: .8125rem; }
+
+/* ── Cards ──────────────────────────────────────────────────────────────── */
+
+.card {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: .875rem 1rem; margin-bottom: .75rem; background: var(--raised);
+}
+.card-head { display: flex; align-items: start; justify-content: space-between; gap: .75rem; }
+.card-title { font-weight: 600; }
+.card-actions { display: flex; gap: .75rem; flex-shrink: 0; }
+.card.is-off { opacity: .62; }
+
+.rows { display: grid; gap: .25rem; margin-top: .5rem; font-size: .875rem; }
+.row { display: flex; gap: .5rem; }
+.row dt { color: var(--muted); min-width: 6.5rem; }
+.row dd { margin: 0; }
+
+/* ── Badges ─────────────────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-block; padding: .0625rem .4375rem; border-radius: 999px;
+  font-size: .6875rem; font-weight: 600; letter-spacing: .01em;
+  border: 1px solid currentColor;
+}
+.badge-ok   { color: var(--ok); }
+.badge-warn { color: var(--warn); }
+.badge-bad  { color: var(--bad); }
+.badge-off  { color: var(--muted); }
+
+/* ── Forms ──────────────────────────────────────────────────────────────── */
+
+label { display: block; font-size: .8125rem; font-weight: 600; margin: 0 0 .25rem; }
+.hint { font-weight: 400; color: var(--muted); }
+
+input[type=text], input[type=email], input[type=password], input[type=url],
+input[type=number], input[type=date], input[type=time], select, textarea {
+  width: 100%; padding: .5rem .625rem; margin-bottom: .875rem;
+  font: inherit; color: inherit; background: var(--bg);
+  border: 1px solid var(--line); border-radius: .375rem;
+}
+textarea { min-height: 5rem; resize: vertical; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+/* A field the server rejected. */
+.invalid input, .invalid select, .invalid textarea { border-color: var(--bad); }
+.field-error { margin: -.625rem 0 .875rem; color: var(--bad); font-size: .8125rem; }
+
+.checkline { display: flex; align-items: center; gap: .5rem; margin-bottom: .75rem; }
+.checkline input { width: auto; margin: 0; }
+.checkline label { margin: 0; font-weight: 400; }
+
+/* Day-of-week picker: seven toggles, not a multi-select nobody can use on a
+   phone. */
+.days { display: flex; gap: .25rem; margin-bottom: .875rem; flex-wrap: wrap; }
+.days input { position: absolute; opacity: 0; pointer-events: none; }
+.days label {
+  margin: 0; padding: .4375rem .5rem; min-width: 2.5rem; text-align: center;
+  border: 1px solid var(--line); border-radius: .375rem; cursor: pointer;
+  font-size: .8125rem; font-weight: 500;
+}
+.days input:checked + label { background: var(--accent); border-color: var(--accent); color: white; }
+.days input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+
+button {
+  font: inherit; font-weight: 600; cursor: pointer;
+  padding: .5rem .875rem; border-radius: .375rem;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+button.danger  { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--bg)); }
+button.small   { padding: .3125rem .5625rem; font-size: .8125rem; }
+button[disabled] { opacity: .55; cursor: default; }
+
+.button-row { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: 1rem; }
+.spacer { flex: 1; }
+
+/* ── History ────────────────────────────────────────────────────────────── */
+
+.attempt { border-left: 2px solid var(--line); padding-left: .75rem; margin-bottom: .75rem; }
+/* Escalation steps nest under the attempt that caused them. */
+.attempt .attempt { margin: .5rem 0 0 0; border-left-color: var(--warn); }
+.attempt-head { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
+.attempt-when { font-variant-numeric: tabular-nums; font-size: .8125rem; color: var(--muted); }
+
+.filters { display: flex; gap: .5rem; flex-wrap: wrap; align-items: end; margin-bottom: 1rem; }
+.filters > div { flex: 1 1 8rem; }
+.filters input, .filters select { margin-bottom: 0; }
+
+/* ── Feedback ───────────────────────────────────────────────────────────── */
+
+#toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: 5rem; z-index: 20;
+  padding: .5rem .875rem; border-radius: .375rem;
+  background: var(--fg); color: var(--bg);
+  font-size: .875rem; box-shadow: 0 2px 12px rgb(0 0 0 / .2);
+  opacity: 0; pointer-events: none; transition: opacity .15s;
+}
+#toast.show { opacity: 1; }
+#toast.bad { background: var(--bad); color: white; }
+@media (min-width: 40rem) { #toast { bottom: 1.5rem; } }
+
+.banner {
+  padding: .625rem .875rem; border-radius: var(--radius);
+  border: 1px solid currentColor; font-size: .875rem; margin-bottom: 1rem;
+}
+.banner-bad  { color: var(--bad); }
+.banner-warn { color: var(--warn); }
+
+.empty { padding: 2rem 1rem; text-align: center; color: var(--muted); }
+.loading { padding: 2rem 1rem; text-align: center; color: var(--muted); }

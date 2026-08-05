@@ -91,14 +91,9 @@
         return;
       }
 
-      // No UI to land on yet, so prove the session round-trips instead: this
-      // call carries only the cookie.
-      const me = await fetch('/api/me', { credentials: 'same-origin' });
-      const who = await me.json();
-
-      say('Signed in as ' + who.account.email + ' — session confirmed via /api/me.', 'ok');
+      say('Signed in — loading…', 'ok');
       form.reset();
-      button.disabled = false;
+      window.location.href = '/app';
     } catch (err) {
       say('Could not reach the server: ' + err.message, 'error');
       button.disabled = false;

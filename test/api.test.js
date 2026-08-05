@@ -288,9 +288,18 @@ async function main() {
   check('enabled by default', r.body.schedule.enabled, true);
   check('relations came back', r.body.schedule.contact.name, 'Grandma');
 
+  // Computed server-side so the interface cannot drift from the scheduler.
+  check('carries nextRunAt', typeof r.body.schedule.nextRunAt, 'string');
+  check('which is in the future', new Date(r.body.schedule.nextRunAt) > new Date(), true);
+  r = await api('GET', '/api/schedules');
+  check('and on the list too', r.body.schedules.every(s => 'nextRunAt' in s), true);
+
   r = await api('POST', `/api/schedules/${scheduleId}/enabled`, { enabled: false });
   check('disabled', r.status, 200);
   check('reflected', r.body.schedule.enabled, false);
+  // Still reported when off, so the UI can say "would have been…" rather than
+  // going blank on the state where nobody gets called.
+  check('nextRunAt still reported when disabled', typeof r.body.schedule.nextRunAt, 'string');
   r = await api('POST', `/api/schedules/${scheduleId}/enabled`, { enabled: 'no' });
   check('non-boolean rejected', r.status, 400);
 

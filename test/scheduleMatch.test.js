@@ -71,4 +71,39 @@ const both = m.findDue([morning, evening], at('2026-08-03T14:20:00Z'), 5);
 check('only morning due at 9:20 AM',          both.length, 1);
 check('and it is the 09:20 one',              both[0].schedule.timeOfDay, '09:20');
 
+console.log('\n--- nextRunAt: when does this fire next ---');
+// Computed on the server so the interface cannot drift from the scheduler.
+// Everything below is a fixed instant, including the DST transitions a live
+// test would have to wait months for.
+const nextIso = (schedule, nowIso) => {
+  const result = m.nextRunAt(schedule, at(nowIso));
+  return result ? result.toISOString() : null;
+};
+
+// Mon 2026-08-03, 08:00 Central (13:00Z). 09:20 has not happened yet today.
+check('later today',                          nextIso(morning, '2026-08-03T13:00:00Z'), '2026-08-03T14:20:00.000Z');
+// Same day, 10:00 Central — today's slot has passed, so tomorrow.
+check('rolls to tomorrow once passed',        nextIso(morning, '2026-08-03T15:00:00Z'), '2026-08-04T14:20:00.000Z');
+// Exactly on the minute counts as passed: the scheduler has already fired it.
+check('on the minute counts as gone',         nextIso(morning, '2026-08-03T14:20:00Z'), '2026-08-04T14:20:00.000Z');
+
+// The Sunday-morning gap: Sat 2026-08-08 after 09:20 must skip Sunday and land
+// on Monday. This is the rule that must survive any refactor.
+const monToSat = { timeOfDay: '09:20', timezone: 'America/Chicago', daysOfWeek: [1,2,3,4,5,6] };
+check('skips the Sunday gap',                 nextIso(monToSat, '2026-08-08T15:00:00Z'), '2026-08-10T14:20:00.000Z');
+
+// A schedule on one weekday only still resolves whichever day it is asked on.
+const sundayOnly = { timeOfDay: '09:20', timezone: 'America/Chicago', daysOfWeek: [0] };
+check('single weekday resolves',              nextIso(sundayOnly, '2026-08-03T13:00:00Z'), '2026-08-09T14:20:00.000Z');
+
+// Across the US DST end (Sun 2026-11-01, clocks go back). 9:20 local must stay
+// 9:20 local — the UTC instant shifts by an hour, which is the whole point.
+const nov = { timeOfDay: '09:20', timezone: 'America/Chicago', daysOfWeek: [0,1,2,3,4,5,6] };
+check('9:20 CDT the day before',              nextIso(nov, '2026-10-31T13:00:00Z'), '2026-10-31T14:20:00.000Z');
+check('9:20 CST after the clocks change',     nextIso(nov, '2026-11-01T12:00:00Z'), '2026-11-01T15:20:00.000Z');
+
+check('unknown timezone → null',              nextIso({ ...morning, timezone: 'Mars/Olympus' }, '2026-08-03T13:00:00Z'), null);
+check('no days selected → null',              nextIso({ ...morning, daysOfWeek: [] }, '2026-08-03T13:00:00Z'), null);
+check('malformed time → null',                nextIso({ ...morning, timeOfDay: '9:20' }, '2026-08-03T13:00:00Z'), null);
+
 process.exitCode = summary() ? 1 : 0;

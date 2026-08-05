@@ -566,8 +566,32 @@ Login is rate-limited to 10 attempts per IP per 15 minutes. That counter is in m
 
 ---
 
+## The interface
+
+Sign in at `/login`, and the app is at `/app`. Five screens:
+
+| | |
+|---|---|
+| **Today** | Next call and how far off, doses confirmed so far, anything the sweeper still owes, and buttons to place a call now |
+| **Schedules** | Time, days, contact, message, and the whole escalation chain. Enable/disable per schedule |
+| **Contacts** | Who can be called. Deleting one still used by a schedule is refused, naming the schedule |
+| **Messages** | Spoken text or an audio file, and which is the default |
+| **History** | Every attempt, escalation steps nested under the attempt that caused them, filterable by date, contact and dose |
+
+**No build step.** Plain ES modules served straight from `public/app/`, matching the same stance `schema.prisma` takes about the Prisma generator: nothing that turns a deploy into a compile, because a build failure on this app means the calls stop. Railway still runs `npm ci` and nothing else.
+
+**The whole thing is gated at the route,** not just by the API it calls — `/app` and every module under it redirect to `/login` without a session. The markup names contacts and schedules, so serving it to anyone who asks would leak who gets called even if every `fetch` came back 401.
+
+**Times are shown in the account's timezone,** not the browser's. "Did she take her morning pills" is a question about her clock, and checking from another timezone should not silently shift every time by hours.
+
+**`nextRunAt` is computed server-side** and returned by `GET /api/schedules`. Working it out in the browser would mean the same DST-sensitive arithmetic written twice, and the failure that invites is an interface confidently displaying a time the scheduler disagrees with. It is reported for disabled schedules too, so the UI can say *"would have been…"* rather than going blank on the state where nobody gets called.
+
+Destructive things ask first, and say what they mean: disabling a schedule warns that no calls will be placed, and **Call now** names the number it is about to ring.
+
+---
+
 ## Known limitations (Phase 3, later steps)
 
-- **No UI yet** beyond the login page. `/api` is the foundation the interface will sit on.
 - **Single user.** The schema and every query are already account-scoped; what's missing is a way to create a second account, not the isolation.
-- **`escalate_with_call`** now runs in production, but had not rung a real phone as of first deploy.
+- **No live updates.** Screens load on navigation; a call placed while you're watching needs a refresh to appear.
+- **Escalation always goes to the real caregiver,** including from a `target=test` call. Only the reminder call's destination is redirected.

@@ -86,6 +86,100 @@ function evaluate(schedule, now, graceMinutes) {
   return { due: true, localTime: local.hhmm, minutesLate };
 }
 
+// ─── When does this schedule fire next? ──────────────────────────────────────
+//
+// Added for the UI, but deliberately here rather than in the browser. The
+// alternative — recomputing "next 9:20 AM in America/Chicago, Mon–Sat" in
+// client JavaScript — is the same DST-sensitive arithmetic written twice, and
+// the failure it invites is the interface confidently displaying a time the
+// scheduler disagrees with. One implementation, and it is the one that already
+// decides whether to place the call.
+
+// The calendar date as it reads in `timeZone`, which is not necessarily the
+// UTC date — at 02:00 UTC it is still the previous day in Chicago.
+function localYMD(date, timeZone) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  const parts = {};
+  for (const p of fmt.formatToParts(date)) parts[p.type] = p.value;
+  return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day) };
+}
+
+// How far `timeZone` is from UTC at this particular instant. Derived by asking
+// Intl to render the instant in that zone and reading the result back as if it
+// were UTC; the difference is the offset. Doing it per-instant is what makes
+// this correct across a DST boundary rather than only today.
+function tzOffsetMs(date, timeZone) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const p = {};
+  for (const x of fmt.formatToParts(date)) p[x.type] = x.value;
+
+  const asUTC = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day),
+                         Number(p.hour), Number(p.minute), Number(p.second));
+  // Seconds resolution: the formatter has no milliseconds to report.
+  return asUTC - Math.floor(date.getTime() / 1000) * 1000;
+}
+
+// The UTC instant at which the clock in `timeZone` reads this wall-clock time.
+//
+// Two passes on purpose. The first uses the offset in force at the naive guess;
+// on a DST changeover that guess can land on the wrong side of the transition,
+// so the offset is re-read at the corrected instant and applied again.
+function wallClockToInstant(year, month, day, minutes, timeZone) {
+  const naive = Date.UTC(year, month - 1, day, Math.floor(minutes / 60), minutes % 60);
+
+  const first  = naive - tzOffsetMs(new Date(naive), timeZone);
+  const second = naive - tzOffsetMs(new Date(first), timeZone);
+
+  return new Date(second);
+}
+
+// The next instant this schedule is due, or null if it never is — no valid
+// time, no days selected, an unknown timezone. A disabled schedule still
+// reports its next run: the interface wants to say "would have been 9:20 AM".
+//
+// The horizon is 8 days so that a schedule running on a single weekday always
+// resolves, whichever day it is asked on.
+function nextRunAt(schedule, now, horizonDays = 8) {
+  const target = parseTimeOfDay(schedule.timeOfDay);
+  if (target === null) return null;
+
+  const days = Array.isArray(schedule.daysOfWeek) ? schedule.daysOfWeek : [];
+  if (!days.length) return null;
+
+  let local, base;
+  try {
+    local = localParts(now, schedule.timezone);
+    base  = localYMD(now, schedule.timezone);
+  } catch {
+    return null; // unknown IANA name — same fail-closed stance as evaluate()
+  }
+
+  for (let offset = 0; offset <= horizonDays; offset++) {
+    const weekday = (local.weekday + offset) % 7;
+    if (!days.includes(weekday)) continue;
+    // Today only counts if the time has not already gone past.
+    if (offset === 0 && local.minutes >= target) continue;
+
+    // Date arithmetic in UTC on a date-only value, so adding a day never
+    // stumbles over a DST-shortened one.
+    const day = new Date(Date.UTC(base.year, base.month - 1, base.day));
+    day.setUTCDate(day.getUTCDate() + offset);
+
+    return wallClockToInstant(
+      day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(),
+      target, schedule.timezone
+    );
+  }
+
+  return null;
+}
+
 function findDue(schedules, now, graceMinutes) {
   const due = [];
   for (const schedule of schedules) {
@@ -95,4 +189,7 @@ function findDue(schedules, now, graceMinutes) {
   return due;
 }
 
-module.exports = { parseTimeOfDay, localParts, evaluate, findDue, WEEKDAY_INDEX };
+module.exports = {
+  parseTimeOfDay, localParts, evaluate, findDue, WEEKDAY_INDEX,
+  nextRunAt, localYMD, tzOffsetMs, wallClockToInstant,
+};

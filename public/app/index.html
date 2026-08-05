@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medication Reminder</title>
+<link rel="stylesheet" href="/app/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>💊</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="#/today">Medication&nbsp;Reminder</a>
+  <div class="topbar-right">
+    <span id="whoami" class="whoami"></span>
+    <button id="signout" class="link-button" type="button">Sign out</button>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Sections">
+  <a href="#/today"     data-tab="today">Today</a>
+  <a href="#/schedules" data-tab="schedules">Schedules</a>
+  <a href="#/contacts"  data-tab="contacts">Contacts</a>
+  <a href="#/messages"  data-tab="messages">Messages</a>
+  <a href="#/history"   data-tab="history">History</a>
+</nav>
+
+<!-- Screens render here. aria-live so a screen change is announced rather than
+     silently swapped underneath a screen reader. -->
+<main id="screen" aria-live="polite"></main>
+
+<!-- Transient feedback: saved, deleted, call placed. -->
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="/app/app.js"></script>
+</body>
+</html>

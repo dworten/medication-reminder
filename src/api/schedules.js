@@ -10,10 +10,22 @@
 const express = require('express');
 const repo    = require('../data/schedules');
 const logger  = require('../logger');
+const { nextRunAt } = require('../scheduleMatch');
 const { asyncHandler, notFound, badRequest } = require('./errors');
 const { scheduleInput } = require('./validate');
 
 const router = express.Router();
+
+// nextRunAt is computed here rather than in the browser on purpose: it is the
+// same DST-sensitive arithmetic the scheduler uses to decide whether to place
+// the call, and having two implementations invites an interface that
+// confidently shows a time the scheduler disagrees with.
+//
+// Reported for disabled schedules too, so the UI can say "would have been…"
+// rather than going blank on the state where nobody gets called.
+function present(schedule, now = new Date()) {
+  return { ...schedule, nextRunAt: nextRunAt(schedule, now) };
+}
 
 // A schedule's contact and message must belong to the same account. The foreign
 // key only proves the row exists — it says nothing about whose it is, so
@@ -66,13 +78,15 @@ function assertSomeoneIsAlerted(data, existing) {
 }
 
 router.get('/', asyncHandler(async (req, res) => {
-  res.json({ schedules: await repo.listForAccount(req.account.id) });
+  const now       = new Date();
+  const schedules = await repo.listForAccount(req.account.id);
+  res.json({ schedules: schedules.map((s) => present(s, now)) });
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {
   const schedule = await repo.getForAccount(req.account.id, req.params.id);
   if (!schedule) throw notFound('No such schedule');
-  res.json({ schedule });
+  res.json({ schedule: present(schedule) });
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
@@ -86,7 +100,7 @@ router.post('/', asyncHandler(async (req, res) => {
   logger.info('Schedule created via API', {
     accountId, scheduleId: schedule.id, dose: schedule.dose, timeOfDay: schedule.timeOfDay,
   });
-  res.status(201).json({ schedule });
+  res.status(201).json({ schedule: present(schedule) });
 }));
 
 router.patch('/:id', asyncHandler(async (req, res) => {
@@ -103,7 +117,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   if (!schedule) throw notFound('No such schedule');
 
   logger.info('Schedule updated via API', { accountId, scheduleId: schedule.id });
-  res.json({ schedule });
+  res.json({ schedule: present(schedule) });
 }));
 
 // Its own endpoint because it is the field someone reaches for in a hurry —
@@ -121,7 +135,7 @@ router.post('/:id/enabled', asyncHandler(async (req, res) => {
   logger.info(`Schedule ${enabled ? 'enabled' : 'DISABLED'} via API`, {
     accountId: req.account.id, scheduleId: schedule.id, dose: schedule.dose,
   });
-  res.json({ schedule });
+  res.json({ schedule: present(schedule) });
 }));
 
 router.delete('/:id', asyncHandler(async (req, res) => {
