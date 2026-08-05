@@ -348,8 +348,6 @@ function escalationPlan(schedule) {
   const contact = (schedule && schedule.escalationContact) || null;
   const to      = (contact && contact.phone) || config.caregiverPhone || null;
 
-  const ackMinutes = (schedule && schedule.escalationAckMinutes) || config.escalationAckMinutes;
-
   return {
     contact,
     to,
@@ -358,7 +356,6 @@ function escalationPlan(schedule) {
     // queueing a call that can only fail.
     withCall: Boolean(schedule ? schedule.escalateWithCall : config.escalateWithCall) && Boolean(to),
     withSms:  Boolean(schedule ? schedule.escalateWithSms  : config.escalateWithSms),
-    ackMs:    ackMinutes * 60 * 1000,
   };
 }
 
@@ -526,12 +523,19 @@ async function deliverEscalation(row) {
 
   // Say so when a call was tried first, otherwise "we couldn't reach her" reads
   // as the only thing that happened.
+  // Say whether the call reached them, because the two cases mean different
+  // things: a text after an answered call is a written copy, a text after an
+  // unanswered one may be the only thing that lands.
   const afterCall = row.parentId
     ? await callHistoryRepo.findById(row.parentId).catch(() => null)
     : null;
-  const extra = afterCall && afterCall.kind === 'ESCALATION_CALL'
-    ? 'We also tried calling you and could not reach you.'
-    : '';
+
+  let extra = '';
+  if (afterCall && afterCall.kind === 'ESCALATION_CALL') {
+    extra = afterCall.outcome === 'CONFIRMED'
+      ? 'You acknowledged this on the call.'
+      : 'We also tried calling you and could not reach you.';
+  }
 
   const body = _escalationBody(
     row.dose, row.errorMessage || 'unconfirmed dose', schedule && schedule.timezone, extra
@@ -548,10 +552,14 @@ async function deliverEscalation(row) {
 // Called by the sweeper for a queued ESCALATION_CALL row: ring the fallback
 // contact and ask him to acknowledge.
 //
-// The follow-up SMS is queued BEFORE the call is placed, not after it fails.
-// Ordering it this way is what makes the chain survive a redeploy: once the row
-// exists, the alert goes out after the ack window no matter what happens to this
-// process. Acknowledging cancels it; a call nobody answers pulls it forward.
+// The SMS is queued BEFORE the call is placed, not after it fails. Ordering it
+// this way is what makes the chain survive a redeploy: once the row exists, the
+// caregiver is alerted no matter what happens to this process.
+//
+// It is due immediately and is not cancellable. Both steps always run, so a
+// missed dose leaves a written record on the caregiver's phone whether or not
+// they answered — a call that was picked up, half-heard and forgotten used to
+// suppress the text entirely, which is the one outcome nobody wanted.
 async function deliverEscalationCall(row) {
   const schedule = row.schedule || null;
   const plan     = escalationPlan(schedule);
@@ -581,7 +589,9 @@ async function deliverEscalationCall(row) {
           dose:       row.dose,
           kind:       'ESCALATION_SMS',
           reason:     row.errorMessage || 'unconfirmed dose',
-          dueAt:      new Date(Date.now() + plan.ackMs),
+          // Now, not after an acknowledgement window: the text is sent
+          // regardless, so delaying it only delays the alert.
+          dueAt:      new Date(),
         });
       } catch (err) {
         if (!_isDuplicateStep(err)) throw err;
@@ -593,7 +603,6 @@ async function deliverEscalationCall(row) {
   logger.call('Placing escalation call', {
     callHistoryId: row.id, to, dose: row.dose,
     followUpSmsId: followUp ? followUp.id : null,
-    ackMinutes:    Math.round(plan.ackMs / 60000),
   });
 
   if (config.mockMode) {
@@ -644,23 +653,20 @@ async function placeVoiceCall(params) {
   return _twilioClient().calls.create(params);
 }
 
-// The fallback contact pressed 1. Close out the call step and cancel the text.
-// Awaited inside the live webhook rather than deferred: the SMS is due on a
-// clock, so cancelling it late means it has already gone out.
+// The fallback contact pressed 1. Recorded, but it no longer suppresses the
+// text — both steps always run, so this marks the call step CONFIRMED and
+// nothing else. The acknowledgement is still worth keeping: it is the
+// difference in the history between "we reached them" and "we called and got
+// nothing".
 async function acknowledgeEscalation(ctx = {}) {
   try {
     await callHistoryRepo.recordOutcome(ctx.callHistoryId, 'CONFIRMED');
-    const canceled = await callHistoryRepo.cancelWork(
-      ctx.followUpId, 'acknowledged on the escalation call'
-    );
-
     logger.call('Escalation acknowledged', {
-      callHistoryId: ctx.callHistoryId, followUpSmsId: ctx.followUpId, canceled, dose: ctx.dose,
+      callHistoryId: ctx.callHistoryId, dose: ctx.dose,
     });
-    return canceled;
+    return true;
   } catch (err) {
-    // The caller is on the line and the TwiML response must still go out. The
-    // consequence of failing here is a redundant SMS, not a missed alert.
+    // The caller is on the line and the TwiML response must still go out.
     logger.error('Could not record escalation acknowledgment', {
       callHistoryId: ctx.callHistoryId, error: err.message,
     });
@@ -682,21 +688,18 @@ async function handleEscalationCallEnded(dose, ctx = {}) {
   }
 
   const current = await callHistoryRepo.currentOutcome(ctx.callHistoryId);
-  if (current === 'CONFIRMED') {
-    logger.info('Escalation call was acknowledged, no SMS needed', { callHistoryId: ctx.callHistoryId });
-    return;
-  }
 
-  // Not acknowledged. The SMS would fire on its own once the ack window lapses;
-  // pulling it forward just means the alert lands now that we know the call
-  // failed, instead of some minutes later.
+  // The text goes out either way, so there is no branch on whether they
+  // acknowledged. This still pulls the follow-up forward, which matters for one
+  // case: a row queued by the previous version with an acknowledgement window
+  // still in the future, in flight across the deploy that removed it.
   const pulled = await callHistoryRepo.makeDueNow(ctx.followUpId);
 
-  logger.call('Escalation call unacknowledged, sending the SMS now', {
+  logger.call('Escalation call ended, the SMS follows regardless', {
     callHistoryId: ctx.callHistoryId, followUpSmsId: ctx.followUpId, pulled, dose, outcome: current,
   });
 
-  if (pulled) kickSweeper();
+  kickSweeper();
 }
 
 module.exports = {

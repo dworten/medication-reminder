@@ -196,9 +196,12 @@ model Schedule {
   escalateWithCall    Boolean @default(false) @map("escalate_with_call")
   escalateWithSms     Boolean @default(true) @map("escalate_with_sms")
 
-  // How long the fallback contact has to acknowledge the escalation CALL before
-  // the follow-up SMS goes out anyway. Both steps enabled means "call him, and
-  // text him too unless he picks up and presses 1".
+  // RETAINED, NO LONGER READ. It was the window in which acknowledging the
+  // escalation call suppressed the follow-up text. Both steps now always run —
+  // a call picked up, half-heard and forgotten used to cancel the text, which
+  // was the one outcome nobody wanted — so nothing consults this. Kept rather
+  // than dropped because removing a column is irreversible and it costs
+  // nothing to leave.
   escalationAckMinutes Int @default(3) @map("escalation_ack_minutes")
 
   // Set by the scheduler after a successful fire, so a restart inside the same

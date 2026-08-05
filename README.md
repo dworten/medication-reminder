@@ -124,19 +124,22 @@ REMINDER_CALL  (never confirmed after max_attempts)
   │    └─ ESCALATION_SMS → the fallback contact                     📲
   │
   └─ escalate_with_call = true
-       └─ ESCALATION_CALL → the fallback contact, "press 1 to acknowledge"
-            ├─ pressed 1  → chain ends                             ✅ CONFIRMED
-            └─ no answer, voicemail, or no keypress
-                 └─ ESCALATION_SMS                                  📲 SENT
+       ├─ ESCALATION_CALL → the fallback contact, "press 1 to acknowledge"
+       │    └─ pressed 1 → recorded, but does not stop the text  ✅ CONFIRMED
+       └─ ESCALATION_SMS  → sent every time                       📲 SENT
 ```
 
-**The text is queued before the call is dialled, not after it fails.** It sits in
-the queue due `escalation_ack_minutes` out; pressing 1 cancels it, and a call
-that goes unanswered pulls it forward so it lands immediately. Ordering it this
-way is what makes the chain survive a crash — once the row exists, the caregiver
-is alerted no matter what happens to the process that placed the call. The
-alternative, sending the SMS in the callback after the call fails, loses the
-alert entirely if that callback never arrives.
+**Both steps always run.** The caregiver gets a call and a text, every time.
+Pressing 1 is recorded — it is the difference in the history between "we reached
+them" and "we called and got nothing" — but it no longer suppresses the text: a
+call picked up, half-heard and forgotten was cancelling the only written record
+of a missed dose.
+
+**The text is queued before the call is dialled, not after it fails.** Ordering
+it this way is what makes the chain survive a crash — once the row exists, the
+caregiver is alerted no matter what happens to the process that placed the call.
+Sending it from the status callback instead loses the alert entirely whenever
+that callback never arrives.
 
 **Alerted exactly once.** `(parent_id, kind)` is UNIQUE, so a duplicate Twilio
 status callback — which does happen — cannot produce a second call or a second

@@ -271,9 +271,11 @@ router.post('/response', async (req, res) => {
 // different meaning for "yes", and the reminder path is the part of this app
 // that must not break — so it is left alone entirely.
 
+// The text is sent either way now, so nothing here may imply otherwise —
+// "instead" would be a promise the system no longer keeps.
 const ESC_QUESTION = 'Press 1 to acknowledge this alert.';
-const ESC_ACK      = 'Thank you. This alert has been acknowledged. Goodbye.';
-const ESC_UNACK    = 'No acknowledgment received. A text message will be sent instead. Goodbye.';
+const ESC_ACK      = 'Thank you. This alert has been acknowledged. A text message has also been sent. Goodbye.';
+const ESC_UNACK    = 'No acknowledgment received. A text message has also been sent. Goodbye.';
 // Said instead of ESC_QUESTION when a machine took the call. It replaces the
 // prompt rather than following it, so the recording never asks for a keypress
 // nobody is there to make.

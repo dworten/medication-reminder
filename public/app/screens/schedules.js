@@ -40,10 +40,9 @@ function escalationSummary(schedule) {
   if (schedule.escalateWithSms)  steps.push('text');
   if (!steps.length) return '<strong>Nobody is alerted</strong> — both escalation steps are off';
 
-  const ack = schedule.escalateWithCall && schedule.escalateWithSms
-    ? ` (text cancelled if acknowledged within ${schedule.escalationAckMinutes} min)`
-    : '';
-  return `${steps.join(' then ')} ${esc(to)}${ack}`;
+  // Both steps always run — acknowledging the call no longer suppresses the
+  // text — so this reads "call and text", not "call then text unless…".
+  return `${steps.join(' and ')} ${esc(to)}`;
 }
 
 function card(schedule, timeZone) {
@@ -164,12 +163,10 @@ function form(schedule, contacts, messages) {
       <label for="f-sms">Text them</label>
     </div>
 
-    <div class="field"><label for="f-ack">Acknowledgement window <span class="hint">— minutes before the text goes out anyway</span></label>
-      <input id="f-ack" name="escalationAckMinutes" type="number" min="1" max="60" value="${esc(s.escalationAckMinutes)}"></div>
-
     <p class="small muted">
-      With both on, the fallback is called first and texted only if they don't press 1 in time.
-      The text is queued the moment the call is placed, so it still arrives if this app restarts mid-chain.
+      With both on they get a call and a text, every time — pressing 1 is recorded
+      but no longer stops the text. The text is queued the moment the call is placed,
+      so it still arrives if this app restarts mid-chain.
     </p>
 
     <div class="button-row">
@@ -255,7 +252,7 @@ export async function renderSchedules(context) {
       clearFieldErrors(formEl);
 
       const data = readForm(formEl, {
-        numbers:  ['maxAttempts', 'retryDelayMinutes', 'maxReprompts', 'escalationAckMinutes'],
+        numbers:  ['maxAttempts', 'retryDelayMinutes', 'maxReprompts'],
         nullable: ['messageId', 'escalationContactId'],
       });
       // The day toggles are checkboxes outside the name-based read, so they are

@@ -255,31 +255,12 @@ async function chainFrom(rootId) {
   });
 }
 
-// Cancels queued work that is no longer wanted — the follow-up SMS after the
-// fallback contact acknowledges the call.
+// Pulls queued work forward to now.
 //
-// Guarded on PENDING and unclaimed so it can never cancel something already in
-// flight: if the sweeper claimed the row a moment earlier, this reports false
-// and the text goes out. An extra "could not confirm" SMS seconds after
-// acknowledging is a far better outcome than a cancel racing a real alert.
-async function cancelWork(id, reason) {
-  if (!id) return false;
-  const result = await db.getClient().callHistory.updateMany({
-    where: { id, outcome: 'PENDING', retryClaimedAt: null },
-    data:  {
-      outcome:      'CANCELED',
-      nextRetryAt:  null,
-      completedAt:  new Date(),
-      errorMessage: reason,
-    },
-  });
-  return result.count === 1;
-}
-
-// Pulls queued work forward to now — the follow-up SMS when the escalation call
-// is answered by nobody, or answered without acknowledgment. Without this the
-// alert would still go out, just after the full ack window; this makes it
-// immediate when we already know the call failed.
+// The escalation SMS is queued due immediately, so this is normally a no-op.
+// It earns its place on one case: a row queued by an older deploy with an
+// acknowledgement window still in the future, in flight when that window was
+// removed.
 async function makeDueNow(id, now = new Date()) {
   if (!id) return false;
   const result = await db.getClient().callHistory.updateMany({
@@ -345,6 +326,6 @@ module.exports = {
   startAttempt, attachCallSid, recordOutcome, closeIfPending, findById, recentForSchedule,
   scheduleRetry, findDueWork, claimWork, completeWork, releaseClaim,
   enqueueEscalation, countPendingWork, SWEEP_INCLUDE,
-  findChildByKind, chainFrom, cancelWork, makeDueNow, currentOutcome,
+  findChildByKind, chainFrom, makeDueNow, currentOutcome,
   recordDestination, listForAccount,
 };

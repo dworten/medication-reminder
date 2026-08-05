@@ -106,7 +106,6 @@ async function main() {
   let plan = callManager.escalationPlan(sched);
   check('call step on', plan.withCall, true);
   check('sms step on', plan.withSms, true);
-  check('ack window from the schedule', plan.ackMs, 7 * 60 * 1000);
   check('dials the escalation contact', plan.to, '+15125550160');
 
   section('a call step with nowhere to dial is dropped, not queued to fail');
@@ -170,42 +169,31 @@ async function main() {
   check('linked to the call step', sms[0].parentId, calls[0].id);
   check('still PENDING', sms[0].outcome, 'PENDING');
   check('not sent yet', texted.length, 0);
-  const minutesOut = Math.round((sms[0].nextRetryAt - Date.now()) / 60000);
-  check('due after the ack window, not now', minutesOut, 3);
+  check('due immediately — the text is sent regardless', sms[0].nextRetryAt <= new Date(Date.now() + 60000), true);
 
-  section('a sweep before the ack window lapses sends nothing');
-  let result = await sweeper.runOnce();
-  check('nothing claimed', result.claimed, 0);
-  check('no text', texted.length, 0);
+  // ── acknowledgment no longer suppresses the text ───────────────────────────
 
-  // ── acknowledgment cancels the text ────────────────────────────────────────
-
-  section('acknowledging on the call cancels the follow-up SMS');
-  const canceled = await callManager.acknowledgeEscalation({
+  section('acknowledging is recorded but does NOT stop the text');
+  let result;
+  // Both steps always run: a call that was picked up, half-heard and forgotten
+  // used to suppress the text entirely, which is the one outcome nobody wanted.
+  const acked = await callManager.acknowledgeEscalation({
     callHistoryId: calls[0].id, followUpId: sms[0].id, dose: 'morning',
   });
-  check('cancel succeeded', canceled, true);
+  check('acknowledgement recorded', acked, true);
 
   let callRow = await prisma.callHistory.findUnique({ where: { id: calls[0].id } });
   check('call step CONFIRMED', callRow.outcome, 'CONFIRMED');
+
   let smsRow = await prisma.callHistory.findUnique({ where: { id: sms[0].id } });
-  check('SMS step CANCELED', smsRow.outcome, 'CANCELED');
-  check('and removed from the queue', smsRow.nextRetryAt, null);
+  check('SMS step still PENDING, not cancelled', smsRow.outcome, 'PENDING');
+  check('and still queued', Boolean(smsRow.nextRetryAt), true);
 
-  // Even once the window would have lapsed, nothing goes out.
-  await prisma.callHistory.update({
-    where: { id: sms[0].id }, data: { nextRetryAt: null },
-  });
   result = await sweeper.runOnce();
-  check('no text after acknowledgment', texted.length, 0);
-
-  section('an acknowledged call ends the chain at the status callback too');
-  await callManager.handleEscalationCallEnded('morning', {
-    callHistoryId: calls[0].id, followUpId: sms[0].id, outcome: null,
-  });
+  check('the text goes out anyway', texted.length, 1);
   smsRow = await prisma.callHistory.findUnique({ where: { id: sms[0].id } });
-  check('SMS stays cancelled', smsRow.outcome, 'CANCELED');
-  check('and is not requeued', smsRow.nextRetryAt, null);
+  check('recorded as SENT', smsRow.outcome, 'SENT');
+  check('and says it was acknowledged', texted[0].body.includes('acknowledged this on the call'), true);
 
   // ── no answer pulls the text forward ───────────────────────────────────────
 
@@ -219,8 +207,8 @@ async function main() {
 
   calls = await rowsOfKind('ESCALATION_CALL');
   sms   = await rowsOfKind('ESCALATION_SMS');
-  const beforePull = Math.round((sms[0].nextRetryAt - Date.now()) / 60000);
-  check('SMS parked 30 minutes out', beforePull, 30);
+  // Due immediately now, whatever the old ack window said.
+  check('SMS queued due now, not parked', sms[0].nextRetryAt <= new Date(Date.now() + 60000), true);
 
   await callManager.handleEscalationCallEnded('morning', {
     callHistoryId: calls[0].id, followUpId: sms[0].id, outcome: 'NO_ANSWER',
