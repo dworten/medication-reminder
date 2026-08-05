@@ -8,7 +8,8 @@
 // account to file their history under. Phase 3's API will pass a real account
 // id from the session instead and can leave getDefault() unused.
 
-const db = require('../db');
+const db     = require('../db');
+const config = require('../config');
 
 async function getDefault() {
   return db.getClient().account.findFirst({ orderBy: { createdAt: 'asc' } });
@@ -26,17 +27,29 @@ async function create({ email, name, passwordHash }) {
   return db.getClient().account.create({ data: { email, name, passwordHash } });
 }
 
-// Whether this account is the one the deployment was set up for — the oldest,
-// same as getDefault().
+// Whether this account administers the deployment.
 //
-// It matters because several settings are per-deployment rather than per-account:
-// TEST_PHONE_NUMBER, GRANDMA_PHONE_NUMBER, CAREGIVER_PHONE_NUMBER, and the
-// Twilio credentials that pay for every call. Those fallbacks belong to the
-// owner alone, so anything that would dial one of them has to check this first.
-// Without it, open signup would let a stranger ring the owner's test phone.
-async function isPrimary(accountId) {
+// It matters because several settings are per-deployment rather than
+// per-account: TEST_PHONE_NUMBER, GRANDMA_PHONE_NUMBER, CAREGIVER_PHONE_NUMBER,
+// and the Twilio credentials that pay for every call. Those belong to whoever
+// runs this, so anything that would dial one of them checks here first —
+// without it, open signup would let a stranger ring the admin's test phone.
+//
+// ADMIN_EMAIL names the account explicitly. The fallback — oldest account —
+// is what this meant before, and it is kept only so an installation that never
+// sets ADMIN_EMAIL still works. It is the weaker rule: "oldest" is implicit,
+// and would move to whoever registered next if the original account were
+// deleted. Setting ADMIN_EMAIL is the durable answer.
+async function isAdmin(accountId) {
+  if (!accountId) return false;
+
+  if (config.adminEmail) {
+    const account = await getById(accountId);
+    return Boolean(account && account.email.toLowerCase() === config.adminEmail);
+  }
+
   const first = await getDefault();
   return Boolean(first && first.id === accountId);
 }
 
-module.exports = { getDefault, getById, getByEmail, create, isPrimary };
+module.exports = { getDefault, getById, getByEmail, create, isAdmin };

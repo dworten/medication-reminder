@@ -571,12 +571,15 @@ Sign in at `/login`, register at `/signup`.
 
 - A new account starts **empty** — no contacts, no schedules, no history. It can only ring numbers it adds itself.
 - Every query is account-scoped, so a new account cannot see or touch anyone else's rows. The API suite proves this by asserting the other account's data is unchanged afterwards.
-- **`/trigger` is scoped too.** It previously resolved schedules across *all* accounts, which open registration would have turned into "any stranger can ring the owner's grandmother". A session now only reaches its own schedules, a foreign schedule id is a 404, and `target=test` is refused for anyone but the deployment owner, since `TEST_PHONE_NUMBER` is theirs.
+- **`/trigger` is scoped too.** It previously resolved schedules across *all* accounts, which open registration would have turned into "any stranger can ring the owner's grandmother". A session now only reaches its own schedules, and a foreign schedule id is a 404.
+- **`target=test` is admin-only.** It dials `TEST_PHONE_NUMBER` — a real handset belonging to whoever runs this. `ADMIN_EMAIL` names the one account allowed to use it; `/api/me` reports `isAdmin` so the interface hides those buttons from everyone else, and `/trigger` checks for itself regardless, because a client is free to ignore what it is told.
 - Signup is rate-limited to 3 per IP per 15 minutes, tighter than login's 10 — a burst of registrations is never legitimate.
 
 What is *not* contained: a registered user can add any phone number and schedule calls to it, on your Twilio balance. If that becomes a problem, set `SIGNUP_ENABLED=false` in Railway — it takes effect on the next request, no deploy — and consider a spend cap in the Twilio console.
 
-`ESCALATION_ACK_MINUTES`, `GRANDMA_PHONE_NUMBER`, `CAREGIVER_PHONE_NUMBER` and `TEST_PHONE_NUMBER` are **per-deployment, not per-account**. They belong to the owner, and `accounts.isPrimary()` is what keeps other accounts away from them.
+`GRANDMA_PHONE_NUMBER`, `CAREGIVER_PHONE_NUMBER` and `TEST_PHONE_NUMBER` are **per-deployment, not per-account**. They belong to whoever runs this, and `accounts.isAdmin()` is what keeps other accounts away from them.
+
+Leaving `ADMIN_EMAIL` unset falls back to the oldest account. That is the weaker rule — it is implicit, and would move to whoever registered next if the original account were ever deleted. Name the email.
 
 **What stays public:** `/webhook/*` keeps its Twilio signature validation and never sees the session middleware at all — Twilio cannot log in, and a live call takes exactly the path it did before auth existed. `/trigger` now accepts **either** a session cookie or the `X-Trigger-Secret` header, so existing curl testing is unaffected.
 

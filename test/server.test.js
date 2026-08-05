@@ -22,6 +22,7 @@ const PORT     = 8097;
 const BASE     = `http://127.0.0.1:${PORT}`;
 const PASSWORD = 'server-suite-password';
 const SECRET   = 'server-suite-trigger-secret';
+const ADMIN_EMAIL = 'admin@example.test';
 
 let server;
 
@@ -53,10 +54,16 @@ const fixtures = {};
 async function seed() {
   const hash = await bcrypt.hash(PASSWORD, 4);
 
-  // The OWNER is whichever account exists first — accounts.isPrimary() reads it
-  // that way, and the env-configured phone numbers belong to them alone.
+  // ADMIN_EMAIL names the admin explicitly, and the server below is started
+  // with it pointed here. Deliberately NOT the oldest account — the fallback
+  // rule is "oldest", so creating this one second proves the email is what
+  // decides, not creation order.
+  fixtures.stranger = await prisma.account.create({
+    data: { email: 'stranger@example.test', passwordHash: hash },
+  });
+
   fixtures.owner = await prisma.account.create({
-    data: { email: 'owner@example.test', passwordHash: hash },
+    data: { email: ADMIN_EMAIL, passwordHash: hash },
   });
   const contact = await prisma.contact.create({
     data: { accountId: fixtures.owner.id, name: 'Grandma', phone: '+15125550150' },
@@ -68,9 +75,6 @@ async function seed() {
     },
   });
 
-  fixtures.stranger = await prisma.account.create({
-    data: { email: 'stranger@example.test', passwordHash: hash },
-  });
 }
 
 async function start() {
@@ -80,6 +84,7 @@ async function start() {
       PORT: String(PORT),
       MOCK_MODE: 'true',
       TRIGGER_SECRET: SECRET,
+      ADMIN_EMAIL,
       SESSION_SECRET: process.env.SESSION_SECRET || 'server-suite-session-secret-32-chars-min',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -161,9 +166,9 @@ async function main() {
   check('target=test refused for a stranger', r.status, 403);
   contains('and explains whose number it is', r.body.error, 'not yours');
 
-  section('the owner is unaffected by that scoping');
+  section('the ADMIN account, named by email, is unaffected');
   const owner = client();
-  r = await owner('POST', '/api/login', { email: 'owner@example.test', password: PASSWORD });
+  r = await owner('POST', '/api/login', { email: ADMIN_EMAIL, password: PASSWORD });
   check('owner signed in', r.status, 200);
 
   r = await owner('POST', '/trigger?dose=morning');

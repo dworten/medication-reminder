@@ -108,13 +108,17 @@ export async function renderToday(context) {
     <h2>Place a call now</h2>
     <p class="small muted" style="margin:-.25rem 0 .75rem">
       Uses the schedule's contact, message and escalation settings.
-      <strong>Test</strong> rings TEST_PHONE_NUMBER instead — but escalation still goes to the real caregiver.
+      ${context.account.isAdmin
+        ? '<strong>Test</strong> rings TEST_PHONE_NUMBER instead — but escalation still goes to the real caregiver.'
+        : ''}
     </p>
     <div class="button-row">
       <button class="primary" data-call="morning" data-target="grandma">Call — morning</button>
       <button class="primary" data-call="evening" data-target="grandma">Call — evening</button>
-      <button data-call="morning" data-target="test">Test — morning</button>
-      <button data-call="evening" data-target="test">Test — evening</button>
+      ${context.account.isAdmin ? `
+        <button data-call="morning" data-target="test">Test — morning</button>
+        <button data-call="evening" data-target="test">Test — evening</button>
+      ` : ''}
     </div>
   `);
 

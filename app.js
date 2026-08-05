@@ -155,9 +155,10 @@ app.post('/trigger', requireTriggerSecret, async (req, res) => {
   // come from a schedule in their own account.
   if (accountId) {
     const accountRepo = require('./src/data/accounts');
-    const isOwner = await accountRepo.isPrimary(accountId).catch(() => false);
+    // Fails closed: if the check itself errors, the answer is "not the admin".
+    const admin = await accountRepo.isAdmin(accountId).catch(() => false);
 
-    if (target === 'test' && !isOwner) {
+    if (target === 'test' && !admin) {
       return res.status(403).json({
         error: 'target=test dials this deployment\'s TEST_PHONE_NUMBER, which is not yours to call',
       });

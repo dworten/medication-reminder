@@ -235,9 +235,14 @@ const requireAuth = asyncHandler(async (req, _res, next) => {
 });
 
 // GET /api/me — how the frontend asks "am I logged in, and as whom?"
-router.get('/me', requireAuth, (req, res) => {
-  res.json({ account: publicAccount(req.account) });
-});
+//
+// isAdmin rides along so the interface can hide what it cannot use. It is a
+// display hint, not the guard: /trigger checks for itself, because a client is
+// free to ignore anything it is told.
+router.get('/me', requireAuth, asyncHandler(async (req, res) => {
+  const isAdmin = await accountRepo.isAdmin(req.account.id).catch(() => false);
+  res.json({ account: { ...publicAccount(req.account), isAdmin } });
+}));
 
 module.exports = router;
 module.exports.requireAuth    = requireAuth;

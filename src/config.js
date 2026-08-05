@@ -72,6 +72,17 @@ const config = {
   sessionSecret:   process.env.SESSION_SECRET || '',
   sessionTtlHours: parseInt(process.env.SESSION_TTL_HOURS || '720', 10),
 
+  // The one account allowed to reach this deployment's own phone numbers —
+  // TEST_PHONE_NUMBER in particular, which is a real handset belonging to
+  // whoever runs this, not a shared resource.
+  //
+  // Pinned to an email rather than "whichever account is oldest", which is what
+  // it used to mean: that is implicit, and would silently move to a stranger's
+  // account if the original were ever deleted. Left unset it falls back to the
+  // oldest account, so an installation that never configures this still behaves
+  // sensibly.
+  adminEmail: (process.env.ADMIN_EMAIL || '').trim().toLowerCase(),
+
   // Public signup.
   //
   // Every call and text any account schedules is placed on THIS deployment's

@@ -437,6 +437,27 @@ async function main() {
   const stillOn = await prisma.schedule.findUnique({ where: { id: fixtures.schedule.id } });
   check('and it really is untouched', stillOn.enabled, true);
 
+  section('/api/me reports whether this account administers the deployment');
+  // A display hint for the interface — it hides the Test buttons rather than
+  // showing ones that only 403. /trigger checks for itself regardless.
+  // `api` was signed out two sections ago; this needs two live sessions.
+  const asFixture = makeClient();
+  await asFixture('POST', '/api/login', { email: 'api@example.test', password: PASSWORD });
+
+  config.adminEmail = 'api@example.test';
+  r = await asFixture('GET', '/api/me');
+  check('the named admin is flagged', r.body.account.isAdmin, true);
+  r = await fresh('GET', '/api/me');
+  check('a new account is not', r.body.account.isAdmin, false);
+
+  // The email decides, not who registered first — `fresh` is the NEWER account.
+  config.adminEmail = 'new@example.test';
+  r = await asFixture('GET', '/api/me');
+  check('changing ADMIN_EMAIL moves it', r.body.account.isAdmin, false);
+  r = await fresh('GET', '/api/me');
+  check('to whoever it names', r.body.account.isAdmin, true);
+  config.adminEmail = '';
+
   section('signup can be closed without a deploy');
   config.signupEnabled = false;
   r = await makeClient()('POST', '/api/signup', { email: 'nope@example.test', password: 'a-long-enough-password' });
