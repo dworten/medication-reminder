@@ -6,7 +6,7 @@
 
 import { api } from '../api.js';
 import {
-  node, esc, badge, formatWhen, outcomeLabel, outcomeKind, kindLabel, toast,
+  node, esc, badge, formatWhen, outcomeBadge, outcomeKind, kindLabel, toast,
 } from '../ui.js';
 
 const PAGE = 25;
@@ -39,22 +39,28 @@ function attempt(row, children, timeZone, depth = 0) {
     ? `${row.contact.name}${redirected ? ` → ${row.toPhone}` : ''}`
     : (row.toPhone || '—');
 
-  return `<div class="attempt">
+  // The outcome tints the rail down the left of the row as well as the badge,
+  // so a column of attempts can be skimmed for the bad ones before any of the
+  // text is read. The badge still spells the outcome out in words.
+  const kind = outcomeKind(row.outcome);
+  const classes = ['attempt', `attempt-${kind}`, depth === 0 ? 'attempt-root' : ''].join(' ');
+
+  return `<article class="${classes.trim()}">
     <div class="attempt-head">
       <span class="attempt-when">${esc(formatWhen(row.startedAt, timeZone))}</span>
-      <strong class="small">${esc(kindLabel(row.kind))}</strong>
+      <strong class="attempt-kind">${esc(kindLabel(row.kind))}</strong>
       <span class="small muted">${esc(row.dose)}${row.attempt > 1 ? ` · try ${row.attempt}` : ''}</span>
-      ${badge(outcomeLabel(row.outcome), outcomeKind(row.outcome))}
+      ${outcomeBadge(row.outcome)}
       ${redirected ? badge('redirected', 'warn') : ''}
     </div>
-    <div class="small muted">
+    <div class="small muted attempt-detail">
       ${esc(who)}
       ${row.repromptCount ? ` · ${row.repromptCount} re-ask${row.repromptCount === 1 ? '' : 's'}` : ''}
       ${row.nextRetryAt ? ` · <strong>queued</strong> for ${esc(formatWhen(row.nextRetryAt, timeZone))}` : ''}
     </div>
-    ${row.errorMessage ? `<div class="small muted">“${esc(row.errorMessage)}”</div>` : ''}
+    ${row.errorMessage ? `<div class="small muted attempt-detail">“${esc(row.errorMessage)}”</div>` : ''}
     ${kids.map((kid) => attempt(kid, children, timeZone, depth + 1)).join('')}
-  </div>`;
+  </article>`;
 }
 
 export async function renderHistory(context) {
@@ -64,31 +70,40 @@ export async function renderHistory(context) {
   const state = { offset: 0, from: '', to: '', contactId: '', dose: '' };
 
   const el = node(`
-    <h1>History</h1>
-    <p class="sub">Every attempt, with escalation steps nested underneath. Read-only.</p>
-
-    <div class="filters">
-      <div><label for="h-from">From</label><input id="h-from" type="date"></div>
-      <div><label for="h-to">To</label><input id="h-to" type="date"></div>
-      <div><label for="h-contact">Contact</label>
-        <select id="h-contact">
-          <option value="">Anyone</option>
-          ${contacts.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
-        </select></div>
-      <div><label for="h-dose">Dose</label>
-        <select id="h-dose">
-          <option value="">Both</option>
-          <option value="morning">Morning</option>
-          <option value="evening">Evening</option>
-        </select></div>
+    <div class="page-head">
+      <div>
+        <h1>History</h1>
+        <p class="sub">Every attempt, with escalation steps nested underneath. Read-only.</p>
+      </div>
     </div>
 
-    <div id="results"><p class="loading">Loading…</p></div>
-    <div class="button-row">
-      <button id="prev" disabled>← Newer</button>
-      <button id="next" disabled>Older →</button>
-      <span class="spacer"></span>
-      <span id="count" class="small muted"></span>
+    <div class="split">
+      <div class="filters" role="group" aria-labelledby="h-filters-title">
+        <h2 class="filters-title" id="h-filters-title">Filter</h2>
+        <div><label for="h-from">From</label><input id="h-from" type="date"></div>
+        <div><label for="h-to">To</label><input id="h-to" type="date"></div>
+        <div><label for="h-contact">Contact</label>
+          <select id="h-contact">
+            <option value="">Anyone</option>
+            ${contacts.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
+          </select></div>
+        <div><label for="h-dose">Dose</label>
+          <select id="h-dose">
+            <option value="">Both</option>
+            <option value="morning">Morning</option>
+            <option value="evening">Evening</option>
+          </select></div>
+      </div>
+
+      <div>
+        <div id="results" class="attempt-list"><p class="loading">Loading…</p></div>
+        <div class="button-row">
+          <button id="prev" disabled>← Newer</button>
+          <button id="next" disabled>Older →</button>
+          <span class="spacer"></span>
+          <span id="count" class="small muted"></span>
+        </div>
+      </div>
     </div>
   `);
 

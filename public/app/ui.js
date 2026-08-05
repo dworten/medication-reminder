@@ -138,6 +138,22 @@ export const outcomeKind  = (outcome) => OUTCOMES[outcome]?.kind  || 'off';
 
 export const badge = (text, kind) => `<span class="badge badge-${kind}">${esc(text)}</span>`;
 
+// An outcome badge carries three independent signals: a shape (the icon), a
+// word, and a colour. "Confirmed" and "No answer" are still told apart with the
+// colour turned off, printed in greyscale, or by someone who cannot see the
+// difference between the green and the red.
+const OUTCOME_ICON = {
+  ok:   '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm3.7 5.9-4.2 4.8a.9.9 0 0 1-1.3.05L3.9 8.5a.9.9 0 1 1 1.2-1.3l1.6 1.5 3.6-4.1a.9.9 0 0 1 1.4 1.2Z"/></svg>',
+  warn: '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm.9 7.6 2.4 1.4a.9.9 0 1 1-.9 1.6L7.6 9a.9.9 0 0 1-.5-.8V4a.9.9 0 1 1 1.8 0v3.6Z"/></svg>',
+  bad:  '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm3 9.7a.9.9 0 1 1-1.3 1.3L8 9.3l-1.7 1.7A.9.9 0 0 1 5 9.7L6.7 8 5 6.3A.9.9 0 0 1 6.3 5L8 6.7 9.7 5A.9.9 0 0 1 11 6.3L9.3 8 11 9.7Z"/></svg>',
+  off:  '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm3.1 8.9H4.9a.9.9 0 1 1 0-1.8h6.2a.9.9 0 1 1 0 1.8Z"/></svg>',
+};
+
+export function outcomeBadge(outcome) {
+  const kind = outcomeKind(outcome);
+  return `<span class="badge badge-${kind}">${OUTCOME_ICON[kind] || ''}${esc(outcomeLabel(outcome))}</span>`;
+}
+
 const KINDS = {
   REMINDER_CALL:   'Call',
   ESCALATION_CALL: 'Caregiver call',
@@ -154,7 +170,7 @@ export function showFieldErrors(form, details) {
   clearFieldErrors(form);
   if (!details || typeof details !== 'object') return false;
 
-  let shown = false;
+  let first = null;
   for (const [name, message] of Object.entries(details)) {
     const input = form.elements[name];
     if (!input) continue;
@@ -165,15 +181,30 @@ export function showFieldErrors(form, details) {
     const note = document.createElement('p');
     note.className = 'field-error';
     note.textContent = typeof message === 'string' ? message : JSON.stringify(message);
+
+    // Tie the message to the input it is about, so a screen reader reads the
+    // reason on landing in the field rather than announcing a bare "invalid".
+    const id = `err-${input.id || name}`;
+    note.id = id;
+    input.setAttribute('aria-invalid', 'true');
+    input.setAttribute('aria-describedby', id);
+
     input.insertAdjacentElement('afterend', note);
-    shown = true;
+    if (!first) first = input;
   }
-  return shown;
+
+  // Land on the first problem instead of leaving it somewhere below the fold.
+  first?.focus({ preventScroll: false });
+  return Boolean(first);
 }
 
 export function clearFieldErrors(form) {
   $$('.field-error', form).forEach((el) => el.remove());
   $$('.invalid', form).forEach((el) => el.classList.remove('invalid'));
+  $$('[aria-invalid]', form).forEach((el) => {
+    el.removeAttribute('aria-invalid');
+    el.removeAttribute('aria-describedby');
+  });
 }
 
 // Reads a form into a plain object. Checkboxes become booleans, number inputs

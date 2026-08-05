@@ -13,39 +13,42 @@ const BUILT_IN = 'Hi, this is your medicine reminder.';
 const QUESTION = 'Have you taken your medicine? Say Yes or No, or type 1 for yes and 2 for no.';
 
 function card(message) {
-  return `<article class="card" data-id="${esc(message.id)}">
+  return `<article class="card message" data-id="${esc(message.id)}">
     <div class="card-head">
       <div>
-        <div class="card-title">
-          ${esc(message.name)}
+        <h3 class="card-title">${esc(message.name)}</h3>
+        <p class="tag-row">
+          ${badge(message.kind === 'AUDIO' ? 'Audio file' : 'Spoken text', 'info')}
           ${message.isDefault ? badge('Default', 'ok') : ''}
-          ${message.kind === 'AUDIO' ? badge('Audio', 'warn') : ''}
-        </div>
-        <div class="small muted" style="margin-top:.25rem">
-          ${message.kind === 'AUDIO'
-            ? esc(message.audioUrl || '(no file)')
-            : esc(message.ttsText || '(no text)')}
-        </div>
+        </p>
       </div>
       <div class="card-actions"><button class="small" data-act="edit">Edit</button></div>
     </div>
+    <p class="message-body">
+      ${message.kind === 'AUDIO'
+        ? esc(message.audioUrl || '(no file)')
+        : `“${esc(message.ttsText || '(no text)')}”`}
+    </p>
   </article>`;
 }
 
 function form(message) {
   const m = message || { name: '', kind: 'TTS', ttsText: '', audioUrl: '', voice: '', language: '', isDefault: false };
 
-  return `<form id="message-form" novalidate>
-    <h2 style="margin-top:0">${message ? 'Edit message' : 'New message'}</h2>
+  return `<form id="message-form" class="panel" novalidate>
+    <h2 class="panel-title">${message ? 'Edit message' : 'New message'}</h2>
+    <p class="sub" style="margin-bottom:1.5rem">Wording any schedule can point at.</p>
 
-    <div class="field"><label for="m-name">Name <span class="hint">— for your reference, never spoken</span></label>
-      <input id="m-name" name="name" type="text" value="${esc(m.name)}" required></div>
+    <div class="form-grid">
+      <div class="field"><label for="m-name">Name <span class="hint">— for your reference, never spoken</span></label>
+        <input id="m-name" name="name" type="text" value="${esc(m.name)}" required></div>
 
-    <div class="field"><label for="m-kind">Type</label>
-      <select id="m-kind" name="kind">
-        <option value="TTS"   ${m.kind === 'TTS'   ? 'selected' : ''}>Spoken text</option>
-        <option value="AUDIO" ${m.kind === 'AUDIO' ? 'selected' : ''}>Audio file</option>
-      </select></div>
+      <div class="field"><label for="m-kind">Type</label>
+        <select id="m-kind" name="kind">
+          <option value="TTS"   ${m.kind === 'TTS'   ? 'selected' : ''}>Spoken text</option>
+          <option value="AUDIO" ${m.kind === 'AUDIO' ? 'selected' : ''}>Audio file</option>
+        </select></div>
+    </div>
 
     <div id="tts-fields" class="${m.kind === 'AUDIO' ? 'hidden' : ''}">
       <div class="field"><label for="m-text">What to say</label>
@@ -84,18 +87,30 @@ export async function renderMessages() {
   const { messages } = await api.messages.list();
 
   const el = node(`
-    <h1>Messages</h1>
-    <p class="sub">What the call says. A schedule with no message uses the built-in wording.</p>
-
-    <div class="card">
-      <div class="card-title small">Built-in default</div>
-      <p class="small muted" style="margin:.25rem 0 0">“${esc(BUILT_IN)}”</p>
+    <div class="page-head">
+      <div>
+        <h1>Messages</h1>
+        <p class="sub">What the call says. A schedule with no message uses the built-in wording.</p>
+      </div>
+      <div class="button-row"><button class="primary" data-act="new">New message</button></div>
     </div>
 
-    <div id="list">
+    <div id="library">
+    <article class="card message is-builtin">
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">Built-in default</h2>
+          <p class="tag-row">${badge('Always available', 'off')}</p>
+        </div>
+      </div>
+      <p class="message-body">“${esc(BUILT_IN)}”</p>
+    </article>
+
+    <h2>Your messages</h2>
+    <div id="list" class="card-grid">
       ${messages.length ? messages.map(card).join('') : '<p class="empty">No custom messages yet.</p>'}
     </div>
-    <div class="button-row"><button class="primary" data-act="new">New message</button></div>
+    </div>
     <div id="editor"></div>
   `);
 
@@ -105,18 +120,20 @@ export async function renderMessages() {
   style.textContent = '.hidden { display: none; }';
   el.appendChild(style);
 
-  const list   = el.querySelector('#list');
-  const editor = el.querySelector('#editor');
-  const newBtn = el.querySelector('[data-act="new"]');
+  // The whole library hides while the editor is open — the built-in card and
+  // the heading included, or the form appears to belong to them.
+  const library = el.querySelector('#library');
+  const editor  = el.querySelector('#editor');
+  const newBtn  = el.querySelector('[data-act="new"]');
 
   function closeEditor() {
     editor.innerHTML = '';
-    list.style.display = '';
+    library.style.display = '';
     newBtn.style.display = '';
   }
 
   function openEditor(message) {
-    list.style.display = 'none';
+    library.style.display = 'none';
     newBtn.style.display = 'none';
     editor.innerHTML = form(message);
 

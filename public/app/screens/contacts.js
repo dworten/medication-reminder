@@ -10,44 +10,48 @@ import { refresh } from '../app.js';
 const ROLE_LABEL = { RECIPIENT: 'Recipient', CAREGIVER: 'Caregiver', BOTH: 'Both' };
 
 function card(contact) {
-  return `<article class="card ${contact.isActive ? '' : 'is-off'}" data-id="${esc(contact.id)}">
+  return `<article class="card contact ${contact.isActive ? '' : 'is-off'}" data-id="${esc(contact.id)}">
     <div class="card-head">
       <div>
-        <div class="card-title">
-          ${esc(contact.name)}
-          ${contact.isActive ? '' : badge('Inactive', 'off')}
-        </div>
-        <div class="small muted">${esc(contact.phone)} · ${esc(ROLE_LABEL[contact.role] || contact.role)}</div>
+        <h2 class="card-title">${esc(contact.name)}</h2>
+        <p class="contact-phone">${esc(contact.phone)}</p>
       </div>
       <div class="card-actions"><button class="small" data-act="edit">Edit</button></div>
     </div>
-    ${contact.notes ? `<p class="small muted" style="margin:.5rem 0 0">${esc(contact.notes)}</p>` : ''}
+    <p class="tag-row">
+      ${badge(ROLE_LABEL[contact.role] || contact.role, 'info')}
+      ${contact.isActive ? '' : badge('Inactive', 'off')}
+    </p>
+    ${contact.notes ? `<p class="small muted contact-notes">${esc(contact.notes)}</p>` : ''}
   </article>`;
 }
 
 function form(contact) {
   const c = contact || { name: '', phone: '', role: 'RECIPIENT', notes: '', isActive: true };
 
-  return `<form id="contact-form" novalidate>
-    <h2 style="margin-top:0">${contact ? 'Edit contact' : 'New contact'}</h2>
+  return `<form id="contact-form" class="panel" novalidate>
+    <h2 class="panel-title">${contact ? 'Edit contact' : 'New contact'}</h2>
+    <p class="sub" style="margin-bottom:1.5rem">A schedule can only call someone who is listed here.</p>
 
-    <div class="field"><label for="c-name">Name</label>
-      <input id="c-name" name="name" type="text" value="${esc(c.name)}" required></div>
+    <div class="form-grid">
+      <div class="field"><label for="c-name">Name</label>
+        <input id="c-name" name="name" type="text" value="${esc(c.name)}" required></div>
 
-    <div class="field">
-      <label for="c-phone">Phone <span class="hint">— E.164: a plus, country code, then the number</span></label>
-      <input id="c-phone" name="phone" type="text" value="${esc(c.phone)}"
-             placeholder="+15125550123" inputmode="tel" required>
+      <div class="field">
+        <label for="c-phone">Phone <span class="hint">— E.164: a plus, country code, then the number</span></label>
+        <input id="c-phone" name="phone" type="text" value="${esc(c.phone)}"
+               placeholder="+15125550123" inputmode="tel" required>
+      </div>
+
+      <div class="field span-2"><label for="c-role">Role <span class="hint">— a label for grouping; the schedule decides who is actually called</span></label>
+        <select id="c-role" name="role">
+          ${Object.entries(ROLE_LABEL).map(([value, label]) =>
+            `<option value="${value}" ${c.role === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+        </select></div>
+
+      <div class="field span-2"><label for="c-notes">Notes <span class="hint">— optional</span></label>
+        <textarea id="c-notes" name="notes">${esc(c.notes || '')}</textarea></div>
     </div>
-
-    <div class="field"><label for="c-role">Role <span class="hint">— a label for grouping; the schedule decides who is actually called</span></label>
-      <select id="c-role" name="role">
-        ${Object.entries(ROLE_LABEL).map(([value, label]) =>
-          `<option value="${value}" ${c.role === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
-      </select></div>
-
-    <div class="field"><label for="c-notes">Notes <span class="hint">— optional</span></label>
-      <textarea id="c-notes" name="notes">${esc(c.notes || '')}</textarea></div>
 
     <div class="checkline">
       <input id="c-active" name="isActive" type="checkbox" ${c.isActive ? 'checked' : ''}>
@@ -67,12 +71,16 @@ export async function renderContacts() {
   const { contacts } = await api.contacts.list();
 
   const el = node(`
-    <h1>Contacts</h1>
-    <p class="sub">Who can be called — the person being reminded, and whoever gets alerted.</p>
-    <div id="list">
+    <div class="page-head">
+      <div>
+        <h1>Contacts</h1>
+        <p class="sub">Who can be called — the person being reminded, and whoever gets alerted.</p>
+      </div>
+      <div class="button-row"><button class="primary" data-act="new">New contact</button></div>
+    </div>
+    <div id="list" class="card-grid">
       ${contacts.length ? contacts.map(card).join('') : '<p class="empty">No contacts yet.</p>'}
     </div>
-    <div class="button-row"><button class="primary" data-act="new">New contact</button></div>
     <div id="editor"></div>
   `);
 

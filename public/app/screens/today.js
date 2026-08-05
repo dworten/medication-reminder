@@ -3,9 +3,9 @@
 
 import { api } from '../api.js';
 import {
-  node, esc, badge, toast, confirmAction,
+  node, esc, toast, confirmAction,
   formatWhen, relative, prettyTime, zoneAbbrev, describeDays,
-  outcomeLabel, outcomeKind, kindLabel,
+  outcomeBadge, outcomeKind, kindLabel,
 } from '../ui.js';
 import { refresh } from '../app.js';
 
@@ -42,29 +42,45 @@ function nextUp(schedules, timeZone) {
   }
 
   const next = upcoming[0];
-  return `<div class="card">
-    <div class="card-head">
-      <div>
-        <div class="card-title">Next call — ${esc(next.name)}</div>
-        <div class="small muted">${esc(next.contact?.name || 'no contact')} · ${esc(prettyTime(next.timeOfDay))} ${esc(zoneAbbrev(next.timezone))}</div>
-      </div>
-      <div class="card-actions"><span class="small">${esc(relative(next.nextRunAt))}</span></div>
-    </div>
-    <div class="small muted" style="margin-top:.5rem">
-      ${esc(formatWhen(next.nextRunAt, timeZone))} · ${esc(describeDays(next.daysOfWeek))}
-    </div>
-  </div>`;
+  return `<article class="card stat-card">
+    <p class="card-eyebrow">Next call</p>
+    <p class="stat-value">${esc(prettyTime(next.timeOfDay))} <span class="stat-unit">${esc(zoneAbbrev(next.timezone))}</span></p>
+    <p class="stat-label">${esc(formatWhen(next.nextRunAt, timeZone))} · <strong>${esc(relative(next.nextRunAt))}</strong></p>
+    <dl class="rows">
+      <div class="row"><dt>Schedule</dt><dd>${esc(next.name)} · ${esc(describeDays(next.daysOfWeek))}</dd></div>
+      <div class="row"><dt>Calls</dt><dd>${esc(next.contact?.name || 'no contact')}</dd></div>
+    </dl>
+  </article>`;
+}
+
+// The summary sits above the individual attempts: the question this screen
+// exists to answer is "did she take them", not "list every call".
+function doseSummary(reminders, confirmed) {
+  const missed = reminders.filter((r) =>
+    ['NOT_CONFIRMED', 'NO_ANSWER', 'BUSY', 'FAILED'].includes(r.outcome)).length;
+
+  let pill = '<span class="pill pill-off">Nothing yet</span>';
+  if (reminders.length && confirmed === reminders.length) pill = '<span class="pill pill-ok">All confirmed</span>';
+  else if (missed) pill = `<span class="pill pill-bad">${missed} missed</span>`;
+  else if (reminders.length) pill = '<span class="pill pill-warn">In progress</span>';
+
+  return `<article class="card stat-card">
+    <p class="card-eyebrow">Doses today</p>
+    <p class="stat-value">${confirmed} <span class="stat-unit">of ${reminders.length}</span></p>
+    <p class="stat-label">reminder call${reminders.length === 1 ? '' : 's'} confirmed</p>
+    <p class="stat-pill">${pill}</p>
+  </article>`;
 }
 
 function attemptLine(row, timeZone) {
-  return `<div class="attempt">
+  return `<article class="attempt attempt-root attempt-${outcomeKind(row.outcome)}">
     <div class="attempt-head">
       <span class="attempt-when">${esc(formatWhen(row.startedAt, timeZone, { withDate: false }))}</span>
-      <strong class="small">${esc(kindLabel(row.kind))}</strong>
+      <strong class="attempt-kind">${esc(kindLabel(row.kind))}</strong>
       <span class="small muted">${esc(row.dose)}${row.attempt > 1 ? ` · try ${row.attempt}` : ''}</span>
-      ${badge(outcomeLabel(row.outcome), outcomeKind(row.outcome))}
+      ${outcomeBadge(row.outcome)}
     </div>
-  </div>`;
+  </article>`;
 }
 
 export async function renderToday(context) {
@@ -85,40 +101,48 @@ export async function renderToday(context) {
   const confirmed = reminders.filter((r) => r.outcome === 'CONFIRMED');
 
   const el = node(`
-    <h1>Today</h1>
-    <p class="sub">${esc(new Intl.DateTimeFormat('en-US', {
-      timeZone, weekday: 'long', month: 'long', day: 'numeric',
-    }).format(new Date()))} · times shown in ${esc(zoneAbbrev(timeZone))}</p>
+    <div class="page-head">
+      <div>
+        <h1>Today</h1>
+        <p class="sub">${esc(new Intl.DateTimeFormat('en-US', {
+          timeZone, weekday: 'long', month: 'long', day: 'numeric',
+        }).format(new Date()))} · times shown in ${esc(zoneAbbrev(timeZone))}</p>
+      </div>
+    </div>
 
-    ${nextUp(schedules, timeZone)}
+    <div class="today-grid">
+      ${nextUp(schedules, timeZone)}
+      ${doseSummary(reminders, confirmed.length)}
+    </div>
 
-    ${queued.length ? `<div class="banner banner-warn">
+    ${queued.length ? `<div class="banner banner-warn"><span>
       ${queued.length} item${queued.length === 1 ? '' : 's'} still queued — the sweeper will act
       ${esc(relative(queued[0].nextRetryAt))}.
-    </div>` : ''}
+    </span></div>` : ''}
 
-    <h2>Doses today</h2>
-    ${reminders.length === 0
-      ? '<p class="empty">No calls placed yet today.</p>'
-      : `<p class="small muted" style="margin:-.25rem 0 .75rem">
-           ${confirmed.length} of ${reminders.length} call${reminders.length === 1 ? '' : 's'} confirmed
-         </p>
-         ${today.map((row) => attemptLine(row, timeZone)).join('')}`}
+    <h2>Every call today</h2>
+    <div class="attempt-list">
+      ${reminders.length === 0
+        ? '<p class="empty">No calls placed yet today.</p>'
+        : today.map((row) => attemptLine(row, timeZone)).join('')}
+    </div>
 
     <h2>Place a call now</h2>
-    <p class="small muted" style="margin:-.25rem 0 .75rem">
-      Uses the schedule's contact, message and escalation settings.
-      ${context.account.isAdmin
-        ? '<strong>Test</strong> rings TEST_PHONE_NUMBER instead — but escalation still goes to the real caregiver.'
-        : ''}
-    </p>
-    <div class="button-row">
-      <button class="primary" data-call="morning" data-target="grandma">Call — morning</button>
-      <button class="primary" data-call="evening" data-target="grandma">Call — evening</button>
-      ${context.account.isAdmin ? `
-        <button data-call="morning" data-target="test">Test — morning</button>
-        <button data-call="evening" data-target="test">Test — evening</button>
-      ` : ''}
+    <div class="panel">
+      <p class="small muted" style="margin:0 0 1rem">
+        Uses the schedule's contact, message and escalation settings.
+        ${context.account.isAdmin
+          ? '<strong>Test</strong> rings TEST_PHONE_NUMBER instead — but escalation still goes to the real caregiver.'
+          : ''}
+      </p>
+      <div class="button-row" style="margin-top:0">
+        <button class="primary" data-call="morning" data-target="grandma">Call — morning</button>
+        <button class="primary" data-call="evening" data-target="grandma">Call — evening</button>
+        ${context.account.isAdmin ? `
+          <button data-call="morning" data-target="test">Test — morning</button>
+          <button data-call="evening" data-target="test">Test — evening</button>
+        ` : ''}
+      </div>
     </div>
   `);
 

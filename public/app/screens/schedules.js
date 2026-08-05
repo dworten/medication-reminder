@@ -6,7 +6,7 @@
 
 import { api } from '../api.js';
 import {
-  node, esc, badge, toast, confirmAction, readForm,
+  node, esc, toast, confirmAction, readForm,
   showFieldErrors, clearFieldErrors,
   prettyTime, zoneAbbrev, describeDays, dayLongName, dayName,
   formatWhen, relative,
@@ -45,40 +45,56 @@ function escalationSummary(schedule) {
   return `${steps.join(' and ')} ${esc(to)}`;
 }
 
+// Status is carried three ways — an icon, the word, and the card's own styling
+// — so "is this one actually going to ring?" never depends on telling one
+// colour from another.
+const ICON_ACTIVE = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm3.7 5.9-4.2 4.8a.9.9 0 0 1-1.3.05L3.9 8.5a.9.9 0 1 1 1.2-1.3l1.6 1.5 3.6-4.1a.9.9 0 0 1 1.4 1.2Z"/></svg>';
+const ICON_PAUSED = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0ZM7 11a.9.9 0 0 1-1.8 0V5a.9.9 0 1 1 1.8 0v6Zm3.8 0a.9.9 0 0 1-1.8 0V5a.9.9 0 1 1 1.8 0v6Z"/></svg>';
+
+const statusPill = (off) => (off
+  ? `<span class="pill pill-off">${ICON_PAUSED} Paused</span>`
+  : `<span class="pill pill-ok">${ICON_ACTIVE} Active</span>`);
+
 function card(schedule, timeZone) {
   const off = !schedule.enabled;
 
-  return `<article class="card ${off ? 'is-off' : ''}" data-id="${esc(schedule.id)}">
-    <div class="card-head">
-      <div>
-        <div class="card-title">
-          ${esc(schedule.name)}
-          ${off ? badge('Disabled', 'off') : ''}
-        </div>
-        <div class="small muted">
-          ${esc(prettyTime(schedule.timeOfDay))} ${esc(zoneAbbrev(schedule.timezone))} ·
-          ${esc(describeDays(schedule.daysOfWeek))}
-        </div>
+  return `<article class="card schedule ${off ? 'is-off' : ''}" data-id="${esc(schedule.id)}">
+    <div class="schedule-head">
+      <div class="schedule-clock">
+        <strong class="schedule-time">${esc(prettyTime(schedule.timeOfDay))}</strong>
+        <span class="schedule-zone">${esc(zoneAbbrev(schedule.timezone))}</span>
       </div>
-      <div class="card-actions">
-        <button class="small" data-act="toggle">${off ? 'Enable' : 'Disable'}</button>
-        <button class="small" data-act="edit">Edit</button>
+      <div class="schedule-id">
+        <h2 class="schedule-name">${esc(schedule.name)}</h2>
+        <p class="schedule-days">${esc(describeDays(schedule.daysOfWeek))}</p>
+        ${statusPill(off)}
       </div>
     </div>
 
-    <dl class="rows">
-      <div class="row"><dt>Calls</dt><dd>${esc(schedule.contact?.name || '—')} · ${esc(schedule.contact?.phone || '')}</dd></div>
-      <div class="row"><dt>Says</dt><dd>${esc(schedule.message?.name || 'Built-in default wording')}</dd></div>
-      <div class="row"><dt>If no answer</dt><dd>${schedule.maxAttempts} attempt${schedule.maxAttempts === 1 ? '' : 's'}, ${schedule.retryDelayMinutes} min apart</dd></div>
-      <div class="row"><dt>Then</dt><dd>${escalationSummary(schedule)}</dd></div>
-      <div class="row"><dt>Next</dt><dd>${
+    <div class="schedule-body">
+      <dl class="rows">
+        <div class="row"><dt>Calls</dt><dd>${esc(schedule.contact?.name || '—')} · ${esc(schedule.contact?.phone || '')}</dd></div>
+        <div class="row"><dt>Says</dt><dd>${esc(schedule.message?.name || 'Built-in default wording')}</dd></div>
+        <div class="row"><dt>If no answer</dt><dd>${schedule.maxAttempts} attempt${schedule.maxAttempts === 1 ? '' : 's'}, ${schedule.retryDelayMinutes} min apart</dd></div>
+        <div class="row"><dt>Then</dt><dd>${escalationSummary(schedule)}</dd></div>
+      </dl>
+    </div>
+
+    <dl class="schedule-foot">
+      <dt>Next call</dt>
+      <dd>${
         off
-          ? '<span class="muted">Disabled — no calls</span>'
+          ? '<span class="muted">None — paused</span>'
           : schedule.nextRunAt
             ? `${esc(formatWhen(schedule.nextRunAt, timeZone))} <span class="muted">(${esc(relative(schedule.nextRunAt))})</span>`
             : '<span class="muted">never — check the days and time</span>'
-      }</dd></div>
+      }</dd>
     </dl>
+
+    <div class="card-actions">
+      <button class="small" data-act="edit">Edit</button>
+      <button class="small" data-act="toggle">${off ? 'Enable' : 'Disable'}</button>
+    </div>
   </article>`;
 }
 
@@ -114,40 +130,45 @@ function form(schedule, contacts, messages) {
 
   const zones = [...new Set([s.timezone, ...COMMON_ZONES])];
 
-  return `<form id="schedule-form" novalidate>
-    <h2 style="margin-top:0">${schedule ? 'Edit schedule' : 'New schedule'}</h2>
+  return `<form id="schedule-form" class="panel" novalidate>
+    <h2 class="panel-title">${schedule ? 'Edit schedule' : 'New schedule'}</h2>
+    <p class="sub" style="margin-bottom:1.5rem">Every field here changes when a real phone rings.</p>
 
-    <div class="field"><label for="f-name">Name</label>
-      <input id="f-name" name="name" type="text" value="${esc(s.name)}" placeholder="Morning meds" required></div>
+    <div class="form-grid">
+      <div class="field"><label for="f-name">Name</label>
+        <input id="f-name" name="name" type="text" value="${esc(s.name)}" placeholder="Morning meds" required></div>
 
-    <div class="field"><label for="f-time">Time <span class="hint">— 24-hour, in the timezone below</span></label>
-      <input id="f-time" name="timeOfDay" type="time" value="${esc(s.timeOfDay)}" required>
-      <p class="small muted" id="dose-hint" style="margin:-.625rem 0 .875rem"></p>
+      <div class="field"><label for="f-time">Time <span class="hint">— 24-hour, in the timezone below</span></label>
+        <input id="f-time" name="timeOfDay" type="time" value="${esc(s.timeOfDay)}" required>
+        <p class="small muted" id="dose-hint" style="margin:-.75rem 0 1rem"></p>
+      </div>
+
+      <div class="field span-2"><label>Days</label>${dayPicker(s.daysOfWeek)}</div>
+
+      <div class="field"><label for="f-zone">Timezone</label>
+        <select id="f-zone" name="timezone">
+          ${zones.map((z) => `<option value="${esc(z)}" ${z === s.timezone ? 'selected' : ''}>${esc(z)}</option>`).join('')}
+        </select></div>
+
+      <div class="field"><label for="f-contact">Who to call</label>
+        <select id="f-contact" name="contactId" required>${options(contacts, s.contactId)}</select></div>
+
+      <div class="field span-2"><label for="f-message">What to say</label>
+        <select id="f-message" name="messageId">${options(messages, s.messageId, 'Built-in default wording')}</select></div>
     </div>
-
-    <div class="field"><label>Days</label>${dayPicker(s.daysOfWeek)}</div>
-
-    <div class="field"><label for="f-zone">Timezone</label>
-      <select id="f-zone" name="timezone">
-        ${zones.map((z) => `<option value="${esc(z)}" ${z === s.timezone ? 'selected' : ''}>${esc(z)}</option>`).join('')}
-      </select></div>
-
-    <div class="field"><label for="f-contact">Who to call</label>
-      <select id="f-contact" name="contactId" required>${options(contacts, s.contactId)}</select></div>
-
-    <div class="field"><label for="f-message">What to say</label>
-      <select id="f-message" name="messageId">${options(messages, s.messageId, 'Built-in default wording')}</select></div>
 
     <h2>If she doesn't answer</h2>
 
-    <div class="field"><label for="f-attempts">Total attempts <span class="hint">— counting the first call</span></label>
-      <input id="f-attempts" name="maxAttempts" type="number" min="1" max="10" value="${esc(s.maxAttempts)}"></div>
+    <div class="form-grid">
+      <div class="field"><label for="f-attempts">Total attempts <span class="hint">— counting the first call</span></label>
+        <input id="f-attempts" name="maxAttempts" type="number" min="1" max="10" value="${esc(s.maxAttempts)}"></div>
 
-    <div class="field"><label for="f-delay">Minutes between attempts</label>
-      <input id="f-delay" name="retryDelayMinutes" type="number" min="1" max="120" value="${esc(s.retryDelayMinutes)}"></div>
+      <div class="field"><label for="f-delay">Minutes between attempts</label>
+        <input id="f-delay" name="retryDelayMinutes" type="number" min="1" max="120" value="${esc(s.retryDelayMinutes)}"></div>
 
-    <div class="field"><label for="f-reprompts">Re-asks within one answered call</label>
-      <input id="f-reprompts" name="maxReprompts" type="number" min="0" max="10" value="${esc(s.maxReprompts)}"></div>
+      <div class="field"><label for="f-reprompts">Re-asks within one answered call</label>
+        <input id="f-reprompts" name="maxReprompts" type="number" min="0" max="10" value="${esc(s.maxReprompts)}"></div>
+    </div>
 
     <h2>Then alert someone</h2>
 
@@ -193,17 +214,21 @@ export async function renderSchedules(context) {
   const anyEnabled = schedules.some((s) => s.enabled);
 
   const el = node(`
-    <h1>Schedules</h1>
-    <p class="sub">When she gets called, and what happens if she doesn't answer.</p>
+    <div class="page-head">
+      <div>
+        <h1>Schedules</h1>
+        <p class="sub">When she gets called, and what happens if she doesn't answer.</p>
+      </div>
+      <div class="button-row"><button class="primary" data-act="new">New schedule</button></div>
+    </div>
     ${schedules.length && !anyEnabled
-      ? '<div class="banner banner-bad">Every schedule is disabled. No reminder calls will be placed.</div>'
+      ? '<div class="banner banner-bad"><span><strong>Every schedule is paused.</strong> No reminder calls will be placed.</span></div>'
       : ''}
-    <div id="list">
+    <div id="list" class="schedule-grid">
       ${schedules.length
         ? schedules.map((s) => card(s, timeZone)).join('')
         : '<p class="empty">No schedules yet.</p>'}
     </div>
-    <div class="button-row"><button class="primary" data-act="new">New schedule</button></div>
     <div id="editor"></div>
   `);
 
@@ -279,7 +304,10 @@ export async function renderSchedules(context) {
       }
     });
 
-    formEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // The CSS reduced-motion block cannot reach a scroll asked for in script,
+    // so the preference is read here too.
+    const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    formEl.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
   }
 
   el.querySelector('[data-act="new"]').addEventListener('click', () => openEditor(null));

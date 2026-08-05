@@ -4,10 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Medication Reminder</title>
+<!-- Matches the page background so the browser chrome does not sit on a seam. -->
+<meta name="theme-color" content="#f4f7fb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f1720" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="/app/style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>💊</text></svg>">
 </head>
 <body>
+
+<!-- First thing a keyboard reaches: a way past the five nav links. -->
+<a class="skip-link" href="#screen">Skip to main content</a>
 
 <header class="topbar">
   <a class="brand" href="#/today">Medication&nbsp;Reminder</a>
@@ -27,7 +33,8 @@
 
 <!-- Screens render here. aria-live so a screen change is announced rather than
      silently swapped underneath a screen reader. -->
-<main id="screen" aria-live="polite"></main>
+<!-- tabindex="-1" so the skip link moves focus here, not just the scroll position. -->
+<main id="screen" tabindex="-1" aria-live="polite"></main>
 
 <!-- Transient feedback: saved, deleted, call placed. -->
 <div id="toast" role="status" aria-live="polite"></div>
