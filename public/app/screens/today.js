@@ -122,14 +122,13 @@ export async function renderToday(context) {
     <div class="today-grid">
       ${nextUp(schedules, timeZone)}
       ${doseSummary(reminders, confirmed.length)}
+      ${adherenceCard(adherence(
+        schedules,
+        fortnight.callHistory,
+        timeZone,
+        fortnight.pagination.hasMore
+      ))}
     </div>
-
-    ${adherenceCard(adherence(
-      schedules,
-      fortnight.callHistory,
-      timeZone,
-      fortnight.pagination.hasMore
-    ))}
 
     ${queued.length ? `<div class="banner banner-warn"><span>
       ${queued.length} item${queued.length === 1 ? '' : 's'} still queued — the sweeper will act

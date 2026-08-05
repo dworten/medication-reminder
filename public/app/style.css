@@ -518,60 +518,61 @@ button[disabled]:hover { background: var(--off-soft); border-color: var(--line);
 .stat-pill { margin: .75rem 0 0; }
 .stat-card .rows { margin-top: .875rem; padding-top: .875rem; border-top: 1px solid var(--line); }
 
-/* ── Adherence strip (Today) ────────────────────────────────────────────── */
+/* ── Adherence sparkline (Today) ────────────────────────────────────────── */
 
-.adherence { display: grid; gap: 1rem; margin-bottom: 1.25rem; }
-.adherence-head {
-  display: flex; flex-wrap: wrap; gap: 1rem 2rem;
-  align-items: flex-start; justify-content: space-between;
+/* Chart marks get their own two colours rather than borrowing the text tokens.
+   A fill and a label want different things from a colour: on a dark ground the
+   accent that reads well as text sits above the chroma floor for a fill and
+   goes grey. Both pairs were run through the palette validator — blue/red at
+   ΔE 19 under protanopia, where green/red would have been 7.6. */
+:root {
+  --chart-bar:  light-dark(#2c5c9a, #4a86d8);
+  --chart-miss: light-dark(#b3251c, #e0605a);
+}
+@supports not (color: light-dark(#000, #fff)) {
+  :root { --chart-bar: #2c5c9a; --chart-miss: #b3251c; }
 }
 
-.legend {
-  display: flex; flex-wrap: wrap; gap: .5rem 1rem;
-  margin: 0; padding: 0; list-style: none;
+.adherence { display: flex; flex-direction: column; }
+
+.spark { margin: 1rem 0 0; display: grid; gap: .375rem; }
+
+.spark-bars {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 2.75rem;
+  border-bottom: 1px solid var(--line);
+}
+.spark-slot { flex: 1 1 0; display: flex; align-items: flex-end; height: 100%; }
+
+.spark-bar {
+  width: 100%; min-height: 2px;
+  background: var(--chart-bar);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+.spark-bar.is-missed { background: var(--chart-miss); }
+/* Nothing due: a tick on the baseline, so an empty day is visibly empty rather
+   than an absent bar that reads as a zero. */
+.spark-bar.is-idle { height: 3px; background: var(--line-strong); border-radius: 2px; }
+.spark-bar.is-today { outline: 2px solid var(--accent-ink); outline-offset: 1px; }
+
+.spark-axis {
+  display: flex; justify-content: space-between;
   font-size: var(--text-xs); color: var(--muted);
 }
-.legend li { display: flex; align-items: center; gap: .375rem; }
-.legend .cell { width: 1.25rem; min-width: 0; font-size: .6875rem; }
 
-/* 14 columns will not fit a phone; the table scrolls inside its own box rather
-   than making the page scroll sideways. */
-.adherence-scroll { overflow-x: auto; }
-
-.adherence-table {
-  width: 100%; table-layout: fixed;
-  border-collapse: separate; border-spacing: .1875rem;
-}
-.adherence-table th {
-  font-size: var(--text-xs); font-weight: 600; color: var(--muted);
-  text-transform: none; letter-spacing: 0;
-}
-.adherence-table th[scope="row"] {
-  width: 4.5rem; text-align: left; white-space: nowrap; padding-right: .5rem;
-}
-.adherence-table th[scope="col"] { padding-bottom: .25rem; }
-.adherence-table th[scope="col"] abbr {
-  display: grid; gap: .0625rem; justify-items: center;
-  text-decoration: none; cursor: help;
-}
-.col-day { font-size: .625rem; letter-spacing: .04em; }
-.col-num { font-variant-numeric: tabular-nums; }
-.adherence-table th[scope="col"].is-today { color: var(--accent-ink); font-weight: 800; }
-
-.cell {
-  display: flex; align-items: center; justify-content: center;
-  aspect-ratio: 1; min-width: 1.375rem;
+/* The numbers behind the bars, folded away until asked for. */
+.spark-detail { margin-top: .875rem; font-size: var(--text-sm); }
+.spark-detail summary {
+  cursor: pointer; color: var(--accent); font-weight: 600; font-size: var(--text-xs);
   border-radius: var(--radius-sm);
-  font-size: var(--text-sm); font-weight: 700; line-height: 1;
 }
-/* Same verified pairs as the badges — glyph on its own soft ground. */
-.cell-ok   { color: var(--ok);    background: var(--ok-soft); }
-.cell-warn { color: var(--warn);  background: var(--warn-soft); }
-.cell-bad  { color: var(--bad);   background: var(--bad-soft); }
-.cell-idle { color: var(--muted); background: var(--off-soft); }
-.cell.is-today { box-shadow: inset 0 0 0 2px var(--accent); }
-
-.adherence-note { margin: 0; }
+.spark-detail table { width: 100%; border-collapse: collapse; margin: .625rem 0; }
+.spark-detail th, .spark-detail td {
+  padding: .1875rem 0; text-align: left; font-weight: 400; font-size: var(--text-xs);
+  border-bottom: 1px solid var(--line);
+}
+.spark-detail th { color: var(--muted); font-weight: 400; }
+.spark-detail td { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* Available to a screen reader, invisible on screen. Used for the word behind
    each glyph, so the strip is readable without seeing the shapes at all. */

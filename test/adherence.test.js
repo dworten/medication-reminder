@@ -137,14 +137,34 @@ const cellFor = (result, dose, key) =>
     adherenceCard(adherence(SCHEDULES, [], TZ, false)).includes('page limit'), false);
 
   const html = adherenceCard(adherence(SCHEDULES, [row(pastMorning, 'morning', 'CONFIRMED')], TZ, false));
-  const open  = (html.match(/<(article|div|table|thead|tbody|tr|td|th|ul|li|p|span|abbr|caption)\b/g) || []).length;
-  const close = (html.match(/<\/(article|div|table|thead|tbody|tr|td|th|ul|li|p|span|abbr|caption)>/g) || []).length;
+  const open  = (html.match(/<(article|figure|figcaption|details|summary|table|tbody|tr|td|th|p|span)\b/g) || []).length;
+  const close = (html.match(/<\/(article|figure|figcaption|details|summary|table|tbody|tr|td|th|p|span)>/g) || []).length;
   check('card markup is balanced', open, close);
-  check('one cell per dose per day', (html.match(/<td class="cell/g) || []).length, DAYS * 2);
-  // Every glyph is paired with a word, so the strip does not depend on colour
-  // or on seeing the shape.
-  check('every cell carries its state in words',
-    (html.match(/<span class="sr-only">/g) || []).length, DAYS * 2);
+  check('one bar per day', (html.match(/class="spark-slot"/g) || []).length, DAYS);
+  check('one table row per day', (html.match(/<tr>/g) || []).length, DAYS);
+
+  // Height carries the meaning; colour is the second encoding. A reader who
+  // cannot separate the hues still sees which days dipped.
+  section('the sparkline does not lean on colour');
+
+  const missDay = window.days.find((d) => !d.isToday && d.weekday !== 0).key;
+  const missed = adherenceCard(adherence(SCHEDULES, [
+    row(missDay, 'morning', 'NO_ANSWER'),
+    row(missDay, 'evening', 'CONFIRMED'),
+  ], TZ, false));
+  check('a day with a miss draws a shorter bar', /style="height:50%"/.test(missed), true);
+  check('and marks it', missed.includes('is-missed'), true);
+
+  // A bar of height zero is invisible, and an invisible failure is the worst
+  // kind, so a wholly missed day still gets a stub.
+  const allMissed = adherenceCard(adherence(SCHEDULES, [
+    row(missDay, 'morning', 'NO_ANSWER'),
+    row(missDay, 'evening', 'NO_ANSWER'),
+  ], TZ, false));
+  check('a wholly missed day is still visible', /style="height:8%"/.test(allMissed), true);
+
+  check('the chart carries a text alternative', /role="img" aria-label="[^"]+"/.test(html), true);
+  check('and the numbers behind it', html.includes('Day by day'), true);
 
   process.exitCode = summary() ? 1 : 0;
 })().catch((err) => {

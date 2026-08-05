@@ -47,16 +47,10 @@ function recentDays(timeZone) {
   return days;
 }
 
-const CELL = {
-  confirmed: { glyph: '✓', kind: 'ok',   text: 'Confirmed' },
-  missed:    { glyph: '✗', kind: 'bad',  text: 'Not confirmed' },
-  pending:   { glyph: '◷', kind: 'warn', text: 'In progress' },
-  nocall:    { glyph: '!', kind: 'warn', text: 'No call was placed' },
-  upcoming:  { glyph: '○', kind: 'idle', text: 'Still to come' },
-  none:      { glyph: '·', kind: 'idle', text: 'Not scheduled' },
-};
-
-// One dose on one day, resolved against the attempts recorded for it.
+// One dose on one day, resolved against the attempts recorded for it. Six
+// states: confirmed, missed, pending, nocall (expected but never attempted),
+// upcoming (today, not yet), none (not scheduled). The card collapses them to
+// a share per day; History is where the individual outcomes are readable.
 function cellState(expected, attempts, isToday) {
   if (!expected) return 'none';
   if (attempts.some((r) => r.outcome === 'CONFIRMED')) return 'confirmed';
@@ -112,59 +106,95 @@ export function adherence(schedules, history, timeZone, truncated) {
     }),
   }));
 
-  return { days, rows, confirmed, counted, truncated };
+  // Per day, collapsed across doses — what the sparkline draws. One bar per day
+  // is the whole chart; the dose-level detail lives in History, which is where
+  // you go when a bar looks wrong.
+  const daily = days.map((day, index) => {
+    const states = rows.map((row) => row.cells[index].state);
+    const due = states.filter((s) => s !== 'none' && s !== 'upcoming').length;
+    return {
+      day,
+      due,
+      confirmed: states.filter((s) => s === 'confirmed').length,
+      missed:    states.filter((s) => s === 'missed' || s === 'nocall').length,
+      pending:   states.filter((s) => s === 'pending').length,
+    };
+  });
+
+  return { days, rows, daily, confirmed, counted, truncated };
 }
 
+const dayLabel = (day) => day.label.replace(/^\w+day, /, '');
+
+// The card is a stat tile: the rate is the point, and the sparkline underneath
+// is context for it. An earlier version drew a cell per dose per day — 28 cells
+// and a five-item legend to say one number, which is the classic way a chart
+// misses what it is for.
+//
+// Height carries the meaning, so a reader who cannot separate the two hues
+// still sees which days dipped. Colour is the second encoding, and the pair is
+// blue/red rather than green/red: green against red is ΔE 7.6 under
+// deuteranopia, which is the floor band, while blue against red is 19.
 export function adherenceCard(data) {
-  const { days, rows, confirmed, counted, truncated } = data;
+  const { daily, confirmed, counted, truncated } = data;
   const rate = counted ? Math.round((confirmed / counted) * 100) : null;
 
-  const header = days.map((day) =>
-    `<th scope="col" class="${day.isToday ? 'is-today' : ''}">
-      <abbr title="${esc(day.label)}">
-        <span class="col-day">${'SMTWTFS'[day.weekday]}</span>
-        <span class="col-num">${day.number}</span>
-      </abbr>
-    </th>`).join('');
+  const withMisses = daily.filter((d) => d.missed > 0).length;
 
-  const body = rows.map((row) => `<tr>
-    <th scope="row">${row.dose === 'morning' ? 'Morning' : 'Evening'}</th>
-    ${row.cells.map(({ day, state }) => {
-      const cell = CELL[state];
-      return `<td class="cell cell-${cell.kind}${day.isToday ? ' is-today' : ''}">
-        <span aria-hidden="true">${cell.glyph}</span>
-        <span class="sr-only">${esc(cell.text)}</span>
-      </td>`;
-    }).join('')}
-  </tr>`).join('');
+  const bars = daily.map((entry) => {
+    const { day, due, missed } = entry;
 
-  const legend = ['confirmed', 'missed', 'pending', 'nocall', 'none']
-    .map((state) => `<li><span class="cell cell-${CELL[state].kind}" aria-hidden="true">${CELL[state].glyph}</span>${esc(CELL[state].text)}</li>`)
-    .join('');
+    // Nothing was due, or nothing is due yet: a low tick, so an empty day is
+    // visibly empty rather than an absent bar that reads as zero.
+    if (!due) {
+      return `<span class="spark-slot"><span class="spark-bar is-idle" title="${esc(dayLabel(day))} — nothing due"></span></span>`;
+    }
 
-  return `<article class="card adherence">
-    <div class="adherence-head">
-      <div>
-        <p class="card-eyebrow">Last ${DAYS} days</p>
-        <p class="stat-value">${rate === null ? '—' : `${rate}%`} <span class="stat-unit">confirmed</span></p>
-        <p class="stat-label">${confirmed} of ${counted} dose${counted === 1 ? '' : 's'} she was due</p>
-      </div>
-      <ul class="legend">${legend}</ul>
-    </div>
+    // A day where nothing was confirmed still gets a stub: a bar of height zero
+    // is invisible, and an invisible failure is the worst kind.
+    const share  = Math.round((entry.confirmed / due) * 100);
+    const height = Math.max(share, 8);
+    const detail = `${entry.confirmed} of ${due} confirmed${missed ? `, ${missed} missed` : ''}`;
 
-    <div class="adherence-scroll">
-      <table class="adherence-table">
-        <caption class="sr-only">Each dose over the last ${DAYS} days, by outcome</caption>
-        <thead><tr><td></td>${header}</tr></thead>
-        <tbody>${body}</tbody>
-      </table>
-    </div>
+    return `<span class="spark-slot"><span
+      class="spark-bar${missed ? ' is-missed' : ''}${day.isToday ? ' is-today' : ''}"
+      style="height:${height}%"
+      title="${esc(dayLabel(day))} — ${esc(detail)}"></span></span>`;
+  }).join('');
 
-    <p class="small muted adherence-note">
-      Which doses were due is read from your schedules as they are set today, so
-      Sunday mornings show as not scheduled rather than missed.
-      ${truncated ? '<strong>Older attempts were trimmed by the API page limit, so the rate covers only what is shown.</strong>' : ''}
-    </p>
+  const summary = rate === null
+    ? `No doses were due in the last ${DAYS} days.`
+    : `${rate}% of doses confirmed over the last ${DAYS} days` +
+      `${withMisses ? `, with a missed dose on ${withMisses} day${withMisses === 1 ? '' : 's'}` : ', none missed'}.`;
+
+  // The numbers behind the bars, for a screen reader and for anyone who wants
+  // the values rather than the shape.
+  const table = daily.map((entry) =>
+    `<tr><th scope="row">${esc(dayLabel(entry.day))}</th>
+      <td>${entry.due ? `${entry.confirmed} of ${entry.due}` : 'none due'}</td></tr>`).join('');
+
+  return `<article class="card stat-card adherence">
+    <p class="card-eyebrow">Last ${DAYS} days</p>
+    <p class="stat-value">${rate === null ? '—' : `${rate}%`} <span class="stat-unit">confirmed</span></p>
+    <p class="stat-label">${confirmed} of ${counted} dose${counted === 1 ? '' : 's'} she was due</p>
+
+    <figure class="spark" role="img" aria-label="${esc(summary)}">
+      <span class="spark-bars">${bars}</span>
+      <figcaption class="spark-axis">
+        <span>${esc(dayLabel(daily[0].day))}</span>
+        <span>Today</span>
+      </figcaption>
+    </figure>
+
+    <details class="spark-detail">
+      <summary>Day by day</summary>
+      <table><tbody>${table}</tbody></table>
+      <p class="small muted">
+        Which doses were due is read from your schedules as they are set today, so
+        Sunday mornings are not counted as missed.
+        ${truncated ? '<strong>Older attempts were trimmed by the API page limit, so the rate covers only what is shown.</strong>' : ''}
+      </p>
+    </details>
   </article>`;
 }
 
