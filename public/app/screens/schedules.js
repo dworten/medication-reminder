@@ -91,6 +91,14 @@ function dayPicker(selected) {
   `).join('')}</div>`;
 }
 
+// The time field carries a #dose-hint paragraph rather than a dose control.
+// The value is derived (see doseFor) but still shown, because it is audible: it
+// decides the goodbye line, and silently changing what she hears is worse than
+// a sentence saying so.
+//
+// Note for future edits: this function is one long template literal, so a
+// backtick anywhere inside it — including in a comment — ends the string and
+// breaks the module. Explanations go here, above it.
 function form(schedule, contacts, messages) {
   const s = schedule || {
     name: '', dose: 'morning', timeOfDay: '09:20', daysOfWeek: [1, 2, 3, 4, 5, 6],
@@ -115,11 +123,6 @@ function form(schedule, contacts, messages) {
 
     <div class="field"><label for="f-time">Time <span class="hint">— 24-hour, in the timezone below</span></label>
       <input id="f-time" name="timeOfDay" type="time" value="${esc(s.timeOfDay)}" required>
-      <!-- Not a field. `dose` is still a real column the call path reads, it is
-           just no longer something to pick: a 9:20 AM schedule is the morning
-           one. Shown because it is audible — it decides the goodbye line — and
-           silently derived state that changes what she hears is worse than a
-           sentence. -->
       <p class="small muted" id="dose-hint" style="margin:-.625rem 0 .875rem"></p>
     </div>
 
