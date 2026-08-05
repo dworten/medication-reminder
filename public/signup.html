@@ -6,27 +6,44 @@
 <title>Medication Reminder — Create an account</title>
 <meta name="theme-color" content="#f4f7fb" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0f1720" media="(prefers-color-scheme: dark)">
+<script>
+  try {
+    var t = localStorage.getItem('medreminder.theme');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  } catch (e) { /* storage blocked — fall back to the device setting */ }
+</script>
 <style>
   /* Same Arctic Frost tokens as /app/style.css and /login. */
   :root {
     color-scheme: light dark;
-    --bg: #f4f7fb; --surface: #ffffff; --raised: #eef3fa;
-    --line: #ccd8e8; --line-strong: #7a8798;
-    --fg: #14202f; --muted: #55637a;
-    --accent: #2c5c9a; --accent-ink: #1f4a80; --accent-soft: #dde8f7; --on-accent: #ffffff;
-    --ok: #0e7048; --ok-soft: #dcf1e6;
-    --bad: #b3251c; --bad-soft: #fbe3e0;
+    --bg: light-dark(#f4f7fb, #0f1720);
+    --surface: light-dark(#ffffff, #16202c);
+    --raised: light-dark(#eef3fa, #1a2531);
+    --line: light-dark(#ccd8e8, #2c3a4b);
+    --line-strong: light-dark(#7a8798, #6b8199);
+    --fg: light-dark(#14202f, #e8eef6);
+    --muted: light-dark(#55637a, #a3b1c4);
+    --accent: light-dark(#2c5c9a, #8ab8ec);
+    --accent-ink: light-dark(#1f4a80, #a9cdf5);
+    --accent-soft: light-dark(#dde8f7, #1c3049);
+    --on-accent: light-dark(#ffffff, #0f1720);
+    --ok: light-dark(#0e7048, #63d29c); --ok-soft: light-dark(#dcf1e6, #14322a);
+    --bad: light-dark(#b3251c, #ff9086); --bad-soft: light-dark(#fbe3e0, #3a1c1b);
+    --shadow: 0 2px 8px light-dark(rgb(20 32 47 / .08), rgb(0 0 0 / .45));
     --radius: .625rem; --radius-sm: .375rem;
     --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   }
-  @media (prefers-color-scheme: dark) {
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"]  { color-scheme: dark; }
+  @supports not (color: light-dark(#000, #fff)) {
     :root {
-      --bg: #0f1720; --surface: #16202c; --raised: #1a2531;
-      --line: #2c3a4b; --line-strong: #6b8199;
-      --fg: #e8eef6; --muted: #a3b1c4;
-      --accent: #8ab8ec; --accent-ink: #a9cdf5; --accent-soft: #1c3049; --on-accent: #0f1720;
-      --ok: #63d29c; --ok-soft: #14322a;
-      --bad: #ff9086; --bad-soft: #3a1c1b;
+      --bg: #f4f7fb; --surface: #ffffff; --raised: #eef3fa;
+      --line: #ccd8e8; --line-strong: #7a8798;
+      --fg: #14202f; --muted: #55637a;
+      --accent: #2c5c9a; --accent-ink: #1f4a80; --accent-soft: #dde8f7; --on-accent: #ffffff;
+      --ok: #0e7048; --ok-soft: #dcf1e6;
+      --bad: #b3251c; --bad-soft: #fbe3e0;
+      --shadow: 0 2px 8px rgb(20 32 47 / .08);
     }
   }
   * { box-sizing: border-box; }
@@ -50,9 +67,8 @@
   .panel {
     background: var(--surface); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 1.75rem;
-    box-shadow: 0 2px 8px rgb(20 32 47 / .08);
+    box-shadow: var(--shadow);
   }
-  @media (prefers-color-scheme: dark) { .panel { box-shadow: 0 2px 8px rgb(0 0 0 / .45); } }
 
   h1 { font-size: 1.375rem; margin: 0; letter-spacing: -.015em; }
   p.sub { margin: .25rem 0 1.5rem; color: var(--muted); font-size: .875rem; }

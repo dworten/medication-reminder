@@ -7,6 +7,7 @@
 
 import { api }  from './api.js';
 import { $, toast } from './ui.js';
+import { mountThemeToggle } from './theme.js';
 
 import { renderToday }     from './screens/today.js';
 import { renderSchedules } from './screens/schedules.js';
@@ -61,6 +62,10 @@ async function route() {
 }
 
 async function start() {
+  // Mounted before anything can fail: the theme button should still work on a
+  // screen that is only showing "could not reach the server".
+  mountThemeToggle($('#theme-toggle'));
+
   try {
     const me = await api.me();
     context.account = me.account;

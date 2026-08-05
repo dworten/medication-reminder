@@ -14,6 +14,7 @@ const path = require('path');
 
 const SUITES = [
   ['frontend',      'frontend.test.js',      'pure — no database'],
+  ['adherence',     'adherence.test.js',     'pure — no database'],
   ['scheduleMatch', 'scheduleMatch.test.js', 'pure — no database'],
   ['scheduler',     'scheduler.test.js',     'needs DATABASE_URL'],
   ['twiml',         'twiml.test.js',         'needs DATABASE_URL'],

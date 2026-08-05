@@ -1,5 +1,6 @@
-// Today — the glance-at-your-phone screen. Was the dose confirmed, when is the
-// next call, and is anything still owed by the retry sweeper.
+// Today — the dashboard. Was the dose confirmed, when is the next call, is
+// anything still owed by the retry sweeper, and how has the last fortnight
+// actually gone.
 
 import { api } from '../api.js';
 import {
@@ -8,6 +9,7 @@ import {
   outcomeBadge, outcomeKind, kindLabel,
 } from '../ui.js';
 import { refresh } from '../app.js';
+import { DAYS, adherence, adherenceCard } from './adherence.js';
 
 // Midnight in the account's timezone, as a UTC instant. "Today" has to mean her
 // day — reading this from another timezone should not show yesterday's calls.
@@ -86,9 +88,16 @@ function attemptLine(row, timeZone) {
 export async function renderToday(context) {
   const timeZone = context.account.timezone;
 
-  const [{ schedules }, { callHistory }] = await Promise.all([
+  // Two windows from the same endpoint: the recent slice the day view needs,
+  // and a fortnight for the adherence strip. The fortnight is asked for at the
+  // API's maximum page, which two doses a day stays well inside; if it ever
+  // does fill up, the card says the rate is partial rather than under-reporting.
+  const fortnightStart = new Date(Date.now() - DAYS * 86400000).toISOString();
+
+  const [{ schedules }, { callHistory }, fortnight] = await Promise.all([
     api.schedules.list(),
     api.history.list({ limit: 50 }),
+    api.history.list({ from: fortnightStart, limit: 200 }),
   ]);
 
   const since  = startOfTodayIn(timeZone);
@@ -114,6 +123,13 @@ export async function renderToday(context) {
       ${nextUp(schedules, timeZone)}
       ${doseSummary(reminders, confirmed.length)}
     </div>
+
+    ${adherenceCard(adherence(
+      schedules,
+      fortnight.callHistory,
+      timeZone,
+      fortnight.pagination.hasMore
+    ))}
 
     ${queued.length ? `<div class="banner banner-warn"><span>
       ${queued.length} item${queued.length === 1 ? '' : 's'} still queued — the sweeper will act

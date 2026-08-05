@@ -8,6 +8,14 @@
 <meta name="theme-color" content="#f4f7fb" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0f1720" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="/app/style.css">
+<!-- Applies a saved theme before the first paint. Inline and synchronous on
+     purpose: a deferred module would let the wrong colour show first. -->
+<script>
+  try {
+    var t = localStorage.getItem('medreminder.theme');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  } catch (e) { /* storage blocked — fall back to the device setting */ }
+</script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>💊</text></svg>">
 </head>
 <body>
@@ -19,6 +27,7 @@
   <a class="brand" href="#/today">Medication&nbsp;Reminder</a>
   <div class="topbar-right">
     <span id="whoami" class="whoami"></span>
+    <button id="theme-toggle" class="theme-toggle" type="button"></button>
     <button id="signout" class="link-button" type="button">Sign out</button>
   </div>
 </header>
