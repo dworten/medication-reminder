@@ -37,7 +37,7 @@ app.use('/webhook', twimlRouter);
 
 // Sessions, only where they are needed. /trigger is included because it accepts
 // a logged-in session as an alternative to the shared secret.
-app.use(['/api', '/login', '/app', '/trigger'], session.middleware());
+app.use(['/api', '/login', '/signup', '/app', '/trigger'], session.middleware());
 
 // The API. A router, so app.js keeps owning the process and nothing else here
 // has to change.
@@ -48,6 +48,15 @@ app.use('/api', apiRouter());
 app.get('/login', (req, res) => {
   if (req.session && req.session.accountId) return res.redirect('/app');
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+// Registration. Serving the page when SIGNUP_ENABLED is off would be an
+// invitation to a form that can only fail, so it redirects instead — and the
+// API refuses independently, since the page is not the guard.
+app.get('/signup', (req, res) => {
+  if (req.session && req.session.accountId) return res.redirect('/app');
+  if (!config.signupEnabled) return res.redirect('/login');
+  res.sendFile(path.join(__dirname, 'public', 'signup.html'));
 });
 
 // The interface.
@@ -90,11 +99,25 @@ app.get('/', (_req, res) => res.redirect('/login'));
 // Resolves which schedule a manual trigger should imitate, so a test call uses
 // the same contact, message and escalation settings the real call would.
 // Falls back to the env phone number when nothing is seeded yet.
-async function resolveTriggerSchedule({ scheduleId, dose }) {
+// Which schedule a manual trigger should imitate.
+//
+// accountId is the whole of the security here. Without it this searched EVERY
+// account's schedules and returned the first matching dose — so once anyone
+// could register, a stranger's /trigger would have used the deployment owner's
+// schedule and rung the owner's grandmother. Same for a schedule id: a foreign
+// id has to resolve to nothing, not to someone else's row.
+async function resolveTriggerSchedule({ scheduleId, dose, accountId }) {
   const scheduleRepo = require('./src/data/schedules');
 
-  if (scheduleId) return scheduleRepo.getById(scheduleId);
+  if (accountId) {
+    if (scheduleId) return scheduleRepo.getForAccount(accountId, scheduleId);
+    const mine = await scheduleRepo.listForAccount(accountId);
+    return mine.find(s => s.enabled && s.dose === dose) || null;
+  }
 
+  // No account context means the shared secret, which only the deployment owner
+  // holds — the pre-Phase-3 behaviour, unchanged.
+  if (scheduleId) return scheduleRepo.getById(scheduleId);
   const enabled = await scheduleRepo.listEnabled();
   return enabled.find(s => s.dose === dose) || null;
 }
@@ -111,9 +134,13 @@ app.post('/trigger', requireTriggerSecret, async (req, res) => {
     return res.status(400).json({ error: 'target must be "grandma" or "test"' });
   }
 
+  // A session belongs to any registered account; the shared secret belongs only
+  // to whoever deployed this. That distinction decides everything below.
+  const accountId = req.triggerVia === 'session' ? req.session.accountId : null;
+
   let schedule = null;
   try {
-    schedule = await resolveTriggerSchedule({ scheduleId, dose });
+    schedule = await resolveTriggerSchedule({ scheduleId, dose, accountId });
   } catch (err) {
     logger.error('Trigger could not load schedule', { error: err.message });
   }
@@ -122,11 +149,34 @@ app.post('/trigger', requireTriggerSecret, async (req, res) => {
     return res.status(404).json({ error: `no schedule with id ${scheduleId}` });
   }
 
+  // GRANDMA_PHONE_NUMBER, TEST_PHONE_NUMBER and CAREGIVER_PHONE_NUMBER are
+  // per-deployment, not per-account: they belong to the owner. A signed-in
+  // stranger must never reach them, so for a session the destination can only
+  // come from a schedule in their own account.
+  if (accountId) {
+    const accountRepo = require('./src/data/accounts');
+    const isOwner = await accountRepo.isPrimary(accountId).catch(() => false);
+
+    if (target === 'test' && !isOwner) {
+      return res.status(403).json({
+        error: 'target=test dials this deployment\'s TEST_PHONE_NUMBER, which is not yours to call',
+      });
+    }
+    if (!schedule) {
+      return res.status(400).json({
+        error: `No enabled ${dose} schedule on your account — create one first`,
+      });
+    }
+    if (!schedule.contact?.phone) {
+      return res.status(400).json({ error: 'That schedule has no contact to call' });
+    }
+  }
+
   // target=test redirects the call to your own phone while still using the
   // schedule's message and settings — the point is to hear what she would hear.
   const to = target === 'test'
     ? config.testPhone
-    : (schedule && schedule.contact && schedule.contact.phone) || config.grandmaPhone;
+    : (schedule && schedule.contact && schedule.contact.phone) || (accountId ? null : config.grandmaPhone);
 
   if (!to) {
     return res.status(400).json({

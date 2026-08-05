@@ -224,6 +224,42 @@ function scheduleInput(body, opts) {
     .done();
 }
 
+// Signup. Deliberately stricter than login, which only has to compare what it
+// is given — this is the one moment the password is chosen, and the only chance
+// to refuse a weak one.
+function signupInput(body) {
+  const config = require('../config');
+  const errors = {};
+
+  const email = String(body?.email || '').trim().toLowerCase();
+  const password = String(body?.password || '');
+
+  // Not a full RFC 5322 parser — that accepts things no mail server will. This
+  // rejects the shapes that are certainly wrong and leaves the rest to
+  // whether the person can actually receive mail there.
+  if (!email) errors.email = 'is required';
+  else if (email.length > 254) errors.email = 'is too long';
+  else if (!/^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/.test(email)) errors.email = 'must be a valid email address';
+
+  if (!password) {
+    errors.password = 'is required';
+  } else if (password.length < config.minPasswordLength) {
+    errors.password = `must be at least ${config.minPasswordLength} characters`;
+  } else if (password.length > 200) {
+    // bcrypt silently truncates past 72 bytes, and an unbounded password is a
+    // free way to make the server do expensive hashing work.
+    errors.password = 'must be 200 characters or fewer';
+  }
+
+  if (body?.name !== undefined && body.name !== null && String(body.name).trim().length > 120) {
+    errors.name = 'must be 120 characters or fewer';
+  }
+
+  if (Object.keys(errors).length) throw badRequest('Validation failed', errors);
+
+  return { email, password, name: body?.name ? String(body.name).trim() : null };
+}
+
 // Query parameters arrive as strings, so these parse as well as check.
 function callHistoryQuery(query = {}) {
   const errors = {};
@@ -264,6 +300,6 @@ function callHistoryQuery(query = {}) {
 }
 
 module.exports = {
-  contactInput, messageInput, scheduleInput, callHistoryQuery,
+  contactInput, messageInput, scheduleInput, callHistoryQuery, signupInput,
   isValidTimezone, E164, HHMM,
 };

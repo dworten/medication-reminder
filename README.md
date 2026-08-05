@@ -17,7 +17,8 @@ Call times, contacts, messages and escalation settings all live in **PostgreSQL*
 ```
 app.js              Express server, /trigger, /health, /login, --test CLI, shutdown
 public/
-  login.html        Minimal sign-in page — proves the session works, nothing more
+  login.html        Sign-in page
+  signup.html       Registration page
 railway.json        Railway build/deploy config (healthcheck, single replica)
 prisma.config.js    Prisma CLI config — connection URL + .env loading (Prisma 7)
 prisma/
@@ -514,6 +515,7 @@ DATABASE_URL='postgresql://postgres:PASSWORD@HOST:PORT/medication_reminder_test'
 Session-authenticated JSON, everything scoped to the logged-in account.
 
 ```
+POST   /api/signup                 { email, password, name? } → { account }  — signs you in
 POST   /api/login                  { email, password } → { account }
 POST   /api/logout
 GET    /api/me                     → { account }   — how a frontend checks auth state
@@ -559,9 +561,22 @@ npm run set-password                  # the only account
 npm run set-password -- you@mail.com  # a specific one
 ```
 
-The password is typed, never passed as an argument — an argument lands in shell history and the process list. There is no signup flow: the account row comes from the seed, and this is the only way it gets a password. **Until you run it, every login returns 401** — an account with a `NULL` password hash is deliberately not loginable.
+The password is typed, never passed as an argument — an argument lands in shell history and the process list. This is how you *change* a password, and the only way to give one to an account created by the seed: such an account has a `NULL` hash, and **an account with no hash cannot log in at all**.
 
-Sign in at `/login`. It's intentionally plain; it exists to prove the session works.
+Sign in at `/login`, register at `/signup`.
+
+### Open registration
+
+`/signup` is public. Anyone who reaches the URL can create an account, and **every call and text they schedule is placed on this deployment's Twilio credentials and billed to its owner.** That is a deliberate choice, not an oversight, and it is worth understanding what does and does not contain it:
+
+- A new account starts **empty** — no contacts, no schedules, no history. It can only ring numbers it adds itself.
+- Every query is account-scoped, so a new account cannot see or touch anyone else's rows. The API suite proves this by asserting the other account's data is unchanged afterwards.
+- **`/trigger` is scoped too.** It previously resolved schedules across *all* accounts, which open registration would have turned into "any stranger can ring the owner's grandmother". A session now only reaches its own schedules, a foreign schedule id is a 404, and `target=test` is refused for anyone but the deployment owner, since `TEST_PHONE_NUMBER` is theirs.
+- Signup is rate-limited to 3 per IP per 15 minutes, tighter than login's 10 — a burst of registrations is never legitimate.
+
+What is *not* contained: a registered user can add any phone number and schedule calls to it, on your Twilio balance. If that becomes a problem, set `SIGNUP_ENABLED=false` in Railway — it takes effect on the next request, no deploy — and consider a spend cap in the Twilio console.
+
+`ESCALATION_ACK_MINUTES`, `GRANDMA_PHONE_NUMBER`, `CAREGIVER_PHONE_NUMBER` and `TEST_PHONE_NUMBER` are **per-deployment, not per-account**. They belong to the owner, and `accounts.isPrimary()` is what keeps other accounts away from them.
 
 **What stays public:** `/webhook/*` keeps its Twilio signature validation and never sees the session middleware at all — Twilio cannot log in, and a live call takes exactly the path it did before auth existed. `/trigger` now accepts **either** a session cookie or the `X-Trigger-Secret` header, so existing curl testing is unaffected.
 

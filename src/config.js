@@ -72,6 +72,19 @@ const config = {
   sessionSecret:   process.env.SESSION_SECRET || '',
   sessionTtlHours: parseInt(process.env.SESSION_TTL_HOURS || '720', 10),
 
+  // Public signup.
+  //
+  // Every call and text any account schedules is placed on THIS deployment's
+  // Twilio credentials and billed to its owner, so open registration is an open
+  // tab. It is a switch rather than a constant precisely so it can be closed
+  // from Railway's dashboard the moment that becomes a problem — no deploy, no
+  // code change, effective on the next request.
+  signupEnabled: process.env.SIGNUP_ENABLED !== 'false',
+
+  // Shared by the signup form and `npm run set-password`, so the rule cannot
+  // drift between the two ways an account gets a password.
+  minPasswordLength: parseInt(process.env.MIN_PASSWORD_LENGTH || '12', 10),
+
   // Retry / flow settings.
   //
   // These are now FALLBACKS, not the source of truth. A call placed from a

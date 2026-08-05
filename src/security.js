@@ -51,12 +51,20 @@ function safeEquals(a, b) {
 function requireTriggerSecret(req, res, next) {
   // Checked first because it is free — no constant-time comparison needed for
   // a session id express-session has already verified the signature of.
-  if (req.session && req.session.accountId) return next();
+  //
+  // How the caller got in is recorded, because it decides what they may reach.
+  // The secret is held only by whoever deployed this, so that path keeps the
+  // env-configured phone numbers as fallbacks. A session belongs to any
+  // registered account, so that path is confined to that account's own data.
+  if (req.session && req.session.accountId) {
+    req.triggerVia = 'session';
+    return next();
+  }
 
   if (!config.triggerSecret) {
     // No secret configured: allow in mock mode (nothing real happens), refuse in
     // live mode rather than leaving an open "call grandma" button on the internet.
-    if (config.mockMode) return next();
+    if (config.mockMode) { req.triggerVia = 'mock'; return next(); }
     logger.warn('Blocked /trigger — TRIGGER_SECRET is not set', { ip: req.ip });
     return res.status(503).json({ error: 'TRIGGER_SECRET is not configured on this server' });
   }
@@ -68,6 +76,7 @@ function requireTriggerSecret(req, res, next) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
+  req.triggerVia = 'secret';
   return next();
 }
 

@@ -6,11 +6,18 @@ const express = require('express');
 const bcrypt  = require('bcryptjs');
 
 const logger      = require('../logger');
+const config      = require('../config');
 const accountRepo = require('../data/accounts');
 const db          = require('../db');
 const { asyncHandler, ApiError } = require('./errors');
+const { signupInput } = require('./validate');
 
 const router = express.Router();
+
+// Matches scripts/set-password.js. About a quarter of a second on modest
+// hardware — irrelevant for something that happens rarely, meaningful against
+// someone working through a stolen hash.
+const BCRYPT_ROUNDS = 12;
 
 // A password hash is never sent to a client, and neither is anything derived
 // from it. Every account response goes through this.
@@ -33,31 +40,45 @@ function publicAccount(account) {
 // belongs in the database, and is not worth it for a single-user app behind a
 // long random password.
 
-const ATTEMPTS   = new Map();
-const MAX_TRIES  = 10;
-const WINDOW_MS  = 15 * 60 * 1000;
+const ATTEMPTS    = new Map();
+const MAX_TRIES   = 10;
+// Tighter than the login ceiling: a burst of failed logins is sometimes a real
+// person who forgot their password, a burst of registrations never is.
+const MAX_SIGNUPS = 3;
+const WINDOW_MS   = 15 * 60 * 1000;
+
+function record(ip) {
+  const existing = ATTEMPTS.get(ip);
+  if (!existing || Date.now() > existing.resetAt) {
+    const fresh = { count: 0, signups: 0, resetAt: Date.now() + WINDOW_MS };
+    ATTEMPTS.set(ip, fresh);
+    return fresh;
+  }
+  return existing;
+}
 
 function tooManyAttempts(ip) {
-  const record = ATTEMPTS.get(ip);
-  if (!record) return false;
-  if (Date.now() > record.resetAt) { ATTEMPTS.delete(ip); return false; }
-  return record.count >= MAX_TRIES;
+  const existing = ATTEMPTS.get(ip);
+  if (!existing) return false;
+  if (Date.now() > existing.resetAt) { ATTEMPTS.delete(ip); return false; }
+  return existing.count >= MAX_TRIES;
 }
 
-function noteFailure(ip) {
-  const record = ATTEMPTS.get(ip);
-  if (!record || Date.now() > record.resetAt) {
-    ATTEMPTS.set(ip, { count: 1, resetAt: Date.now() + WINDOW_MS });
-    return;
-  }
-  record.count += 1;
+function noteFailure(ip) { record(ip).count += 1; }
+
+function signupAttempts(ip) {
+  const existing = ATTEMPTS.get(ip);
+  if (!existing || Date.now() > existing.resetAt) return 0;
+  return existing.signups;
 }
+
+function noteSignup(ip) { record(ip).signups += 1; }
 
 // Bounded so a flood of distinct source IPs cannot grow this without limit.
 function pruneAttempts() {
   if (ATTEMPTS.size < 1000) return;
   const now = Date.now();
-  for (const [ip, record] of ATTEMPTS) if (now > record.resetAt) ATTEMPTS.delete(ip);
+  for (const [ip, entry] of ATTEMPTS) if (now > entry.resetAt) ATTEMPTS.delete(ip);
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -120,6 +141,66 @@ router.post('/login', asyncHandler(async (req, res) => {
 
   logger.info('Login', { accountId: account.id, email: account.email, ip });
   res.json({ account: publicAccount(updated) });
+}));
+
+// Public registration.
+//
+// Every call and text a new account schedules is placed on this deployment's
+// Twilio credentials and billed to its owner, so this is a more consequential
+// endpoint than a signup form usually is. Three things follow from that: it is
+// rate limited harder than login, SIGNUP_ENABLED can close it from Railway
+// without a deploy, and a new account starts completely empty — no contacts, no
+// schedules, and no access to the owner's env-configured phone numbers.
+router.post('/signup', asyncHandler(async (req, res) => {
+  if (!config.signupEnabled) {
+    throw new ApiError(503, 'Registration is closed');
+  }
+
+  const ip = req.ip || 'unknown';
+  pruneAttempts();
+
+  // Shares the login limiter's map but has its own, tighter ceiling: a burst of
+  // signups is never legitimate, where a burst of failed logins sometimes is.
+  if (signupAttempts(ip) >= MAX_SIGNUPS) {
+    logger.warn('Signup rate limited', { ip });
+    throw new ApiError(429, 'Too many accounts created from here. Try again later.');
+  }
+
+  const { email, password, name } = signupInput(req.body);
+
+  const existing = await accountRepo.getByEmail(email);
+  if (existing) {
+    // Registration inherently reveals whether an address is taken — there is no
+    // way to accept or refuse without saying so. Login stays deliberately vague;
+    // this cannot be.
+    throw new ApiError(409, 'An account with that email already exists');
+  }
+
+  const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+  let account;
+  try {
+    account = await accountRepo.create({ email, name, passwordHash: hash });
+  } catch (err) {
+    // Two requests racing past the check above; the unique index settles it.
+    if (err.code === 'P2002') throw new ApiError(409, 'An account with that email already exists');
+    throw err;
+  }
+
+  noteSignup(ip);
+  logger.info('Account created', { accountId: account.id, email: account.email, ip });
+
+  // Signed straight in — asking someone to register and then log in with the
+  // credentials they just typed is a pointless second step.
+  await new Promise((resolve, reject) =>
+    req.session.regenerate((err) => (err ? reject(err) : resolve()))
+  );
+  req.session.accountId = account.id;
+  await new Promise((resolve, reject) =>
+    req.session.save((err) => (err ? reject(err) : resolve()))
+  );
+
+  res.status(201).json({ account: publicAccount(account) });
 }));
 
 router.post('/logout', asyncHandler(async (req, res) => {

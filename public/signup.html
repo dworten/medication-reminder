@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medication Reminder — Create an account</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: grid; place-items: center; padding: 1.5rem 0;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: Canvas; color: CanvasText;
+  }
+  main { width: min(24rem, calc(100vw - 2rem)); }
+  h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+  p.sub { margin: 0 0 1.5rem; opacity: .7; font-size: .875rem; }
+  label { display: block; font-size: .8125rem; font-weight: 600; margin-bottom: .25rem; }
+  .hint { font-weight: 400; opacity: .7; }
+  input {
+    width: 100%; padding: .5rem .625rem; margin-bottom: 1rem;
+    font: inherit; color: inherit;
+    background: Canvas; border: 1px solid GrayText; border-radius: .375rem;
+  }
+  input:focus-visible { outline: 2px solid Highlight; outline-offset: 1px; }
+  button {
+    width: 100%; padding: .5rem; font: inherit; font-weight: 600;
+    color: Canvas; background: CanvasText;
+    border: 0; border-radius: .375rem; cursor: pointer;
+  }
+  button[disabled] { opacity: .6; cursor: default; }
+  #msg { margin-top: 1rem; font-size: .875rem; min-height: 1.5em; }
+  #msg[data-kind="error"] { color: #d33; }
+  #msg[data-kind="ok"]    { color: #2a7; }
+  .field-error { margin: -.75rem 0 1rem; color: #d33; font-size: .8125rem; }
+  .alt { margin-top: 1.5rem; font-size: .875rem; text-align: center; opacity: .8; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Create an account</h1>
+  <p class="sub">Set up medication reminder calls for someone.</p>
+
+  <form id="f" novalidate>
+    <label for="name">Your name <span class="hint">— optional</span></label>
+    <input id="name" name="name" type="text" autocomplete="name">
+
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+
+    <label for="password">Password <span class="hint">— at least 12 characters</span></label>
+    <input id="password" name="password" type="password" autocomplete="new-password" required>
+
+    <label for="confirm">Confirm password</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
+
+    <button id="submit" type="submit">Create account</button>
+  </form>
+
+  <p id="msg" role="status" aria-live="polite"></p>
+  <p class="alt">Already have one? <a href="/login">Sign in</a></p>
+</main>
+
+<script>
+  const form    = document.getElementById('f');
+  const button  = document.getElementById('submit');
+  const msg     = document.getElementById('msg');
+
+  function say(text, kind) {
+    msg.textContent = text;
+    msg.dataset.kind = kind || '';
+  }
+
+  function clearErrors() {
+    for (const el of document.querySelectorAll('.field-error')) el.remove();
+  }
+
+  // Puts the server's per-field messages under the input each one is about.
+  function showErrors(details) {
+    clearErrors();
+    let shown = false;
+    for (const [name, message] of Object.entries(details || {})) {
+      const input = form.elements[name];
+      if (!input) continue;
+      const note = document.createElement('p');
+      note.className = 'field-error';
+      note.textContent = message;
+      input.insertAdjacentElement('afterend', note);
+      shown = true;
+    }
+    return shown;
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    clearErrors();
+
+    const password = document.getElementById('password').value;
+    const confirm  = document.getElementById('confirm').value;
+
+    // Checked here rather than server-side: the server never sees `confirm`,
+    // and it exists only to catch a typo in something you cannot read back.
+    if (password !== confirm) {
+      showErrors({ confirm: 'does not match' });
+      say('Those passwords do not match.', 'error');
+      return;
+    }
+
+    button.disabled = true;
+    say('Creating your account…');
+
+    try {
+      const response = await fetch('/api/signup', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          name:     document.getElementById('name').value,
+          email:    document.getElementById('email').value,
+          password,
+        }),
+      });
+
+      const body = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        const marked = showErrors(body.details);
+        say(marked ? 'Check the highlighted fields.' : (body.error || 'Could not create the account'), 'error');
+        button.disabled = false;
+        return;
+      }
+
+      // Signup signs you in, so there is nowhere to send you but the app.
+      say('Account created — loading…', 'ok');
+      window.location.href = '/app';
+    } catch (err) {
+      say('Could not reach the server: ' + err.message, 'error');
+      button.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

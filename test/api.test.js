@@ -378,6 +378,72 @@ async function main() {
   r = await api('GET', '/api/contacts');
   check('and so is everything else', r.status, 401);
 
+  // ── signup ────────────────────────────────────────────────────────────────
+
+  section('signup: validation before anything is created');
+  const fresh = makeClient();
+  const before = await prisma.account.count();
+
+  r = await fresh('POST', '/api/signup', { email: 'not-an-email', password: 'a-long-enough-password' });
+  check('bad email rejected', r.status, 400);
+  contains('names the field', JSON.stringify(r.body.details), 'email');
+
+  r = await fresh('POST', '/api/signup', { email: 'new@example.test', password: 'short' });
+  check('short password rejected', r.status, 400);
+  contains('says how long', r.body.details.password, 'at least');
+
+  r = await fresh('POST', '/api/signup', { email: 'new@example.test' });
+  check('missing password rejected', r.status, 400);
+
+  check('nothing was created by any of that', await prisma.account.count(), before);
+
+  section('signup: creates an account and signs you straight in');
+  r = await fresh('POST', '/api/signup', {
+    email: 'NEW@Example.Test', name: 'New Person', password: 'a-long-enough-password',
+  });
+  check('201', r.status, 201);
+  check('email normalised to lowercase', r.body.account.email, 'new@example.test');
+  check('never returns the hash', r.body.account.passwordHash, undefined);
+
+  r = await fresh('GET', '/api/me');
+  check('already signed in', r.status, 200);
+  check('as the new account', r.body.account.email, 'new@example.test');
+
+  section('signup: the email is taken');
+  const another = makeClient();
+  r = await another('POST', '/api/signup', { email: 'new@example.test', password: 'a-long-enough-password' });
+  check('409', r.status, 409);
+  contains('says why', r.body.error, 'already exists');
+
+  section('signup: the password actually works');
+  const relog = makeClient();
+  r = await relog('POST', '/api/login', { email: 'new@example.test', password: 'a-long-enough-password' });
+  check('can log in with it', r.status, 200);
+
+  section('A NEW ACCOUNT SEES NOTHING OF ANYONE ELSE\'S');
+  // The whole reason open registration is safe to run at all.
+  r = await fresh('GET', '/api/contacts');
+  check('no contacts', r.body.contacts.length, 0);
+  r = await fresh('GET', '/api/schedules');
+  check('no schedules', r.body.schedules.length, 0);
+  r = await fresh('GET', '/api/call-history');
+  check('no history', r.body.callHistory.length, 0);
+
+  // And cannot reach the fixture account's rows by id.
+  r = await fresh('GET', `/api/contacts/${fixtures.contact.id}`);
+  check('a known contact id → 404', r.status, 404);
+  r = await fresh('POST', `/api/schedules/${fixtures.schedule.id}/enabled`, { enabled: false });
+  check('cannot disable a stranger\'s schedule', r.status, 404);
+  const stillOn = await prisma.schedule.findUnique({ where: { id: fixtures.schedule.id } });
+  check('and it really is untouched', stillOn.enabled, true);
+
+  section('signup can be closed without a deploy');
+  config.signupEnabled = false;
+  r = await makeClient()('POST', '/api/signup', { email: 'nope@example.test', password: 'a-long-enough-password' });
+  check('503', r.status, 503);
+  check('and no account made', await prisma.account.findUnique({ where: { email: 'nope@example.test' } }), null);
+  config.signupEnabled = true;
+
   section('unknown API paths are JSON, not HTML');
   r = await api('GET', '/api/nope');
   check('404', r.status, 404);

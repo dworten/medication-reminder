@@ -7,8 +7,10 @@
 //
 // The password is typed, never passed as an argument — an argument lands in
 // shell history and in the process list, where anyone on the machine can read
-// it. There is deliberately no signup flow: the account row comes from the
-// seed, and this is the only way it ever gets a password.
+// it.
+//
+// Signup exists too, at /signup. This remains the way to CHANGE a password, and
+// the only way to give one to an account created by the seed.
 
 require('dotenv').config();
 
@@ -22,7 +24,9 @@ const { PrismaPg }     = require('@prisma/adapter-pg');
 // a second on modest hardware — irrelevant for a login that happens rarely,
 // meaningful against someone working through a stolen hash.
 const ROUNDS = 12;
-const MIN_LENGTH = 12;
+// Shared with the signup form, so the rule cannot drift between the two ways an
+// account gets a password.
+const MIN_LENGTH = require('../src/config').minPasswordLength;
 
 function ask(question, { hidden = false } = {}) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });

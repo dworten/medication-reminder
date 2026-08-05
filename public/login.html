@@ -34,6 +34,7 @@
   #msg { margin-top: 1rem; font-size: .875rem; min-height: 1.5em; }
   #msg[data-kind="error"] { color: #d33; }
   #msg[data-kind="ok"]    { color: #2a7; }
+  .alt { margin-top: 1.5rem; font-size: .875rem; text-align: center; opacity: .8; }
 </style>
 </head>
 <body>
@@ -53,6 +54,7 @@
 
   <!-- aria-live so the result is announced, not just shown -->
   <p id="msg" role="status" aria-live="polite"></p>
+  <p class="alt">No account yet? <a href="/signup">Create one</a></p>
 </main>
 
 <script>
