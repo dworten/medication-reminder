@@ -18,6 +18,19 @@ const COMMON_ZONES = [
   'America/Phoenix', 'America/Anchorage', 'Pacific/Honolulu', 'UTC',
 ];
 
+// `dose` is derived from the time rather than chosen. It was a redundant
+// question — a 9:20 AM schedule is obviously the morning one — but the column
+// is not cosmetic: it travels in the webhook query string, picks the goodbye
+// line ("have a good rest of your day" vs "have a good night"), names the dose
+// in the caregiver's alert, and is what History filters on. So the control is
+// gone and the value is computed, not dropped.
+const doseFor = (timeOfDay) => (Number(String(timeOfDay).slice(0, 2)) < 12 ? 'morning' : 'evening');
+
+const GOODBYE = {
+  morning: 'Have a good rest of your day.',
+  evening: 'Have a good night.',
+};
+
 function escalationSummary(schedule) {
   const to = schedule.escalationContact?.name;
   if (!to) return 'No escalation contact — <strong>nobody is alerted</strong>';
@@ -100,14 +113,15 @@ function form(schedule, contacts, messages) {
     <div class="field"><label for="f-name">Name</label>
       <input id="f-name" name="name" type="text" value="${esc(s.name)}" placeholder="Morning meds" required></div>
 
-    <div class="field"><label for="f-dose">Dose <span class="hint">— travels through the whole call flow and picks the goodbye line</span></label>
-      <select id="f-dose" name="dose">
-        <option value="morning" ${s.dose === 'morning' ? 'selected' : ''}>Morning</option>
-        <option value="evening" ${s.dose === 'evening' ? 'selected' : ''}>Evening</option>
-      </select></div>
-
     <div class="field"><label for="f-time">Time <span class="hint">— 24-hour, in the timezone below</span></label>
-      <input id="f-time" name="timeOfDay" type="time" value="${esc(s.timeOfDay)}" required></div>
+      <input id="f-time" name="timeOfDay" type="time" value="${esc(s.timeOfDay)}" required>
+      <!-- Not a field. `dose` is still a real column the call path reads, it is
+           just no longer something to pick: a 9:20 AM schedule is the morning
+           one. Shown because it is audible — it decides the goodbye line — and
+           silently derived state that changes what she hears is worse than a
+           sentence. -->
+      <p class="small muted" id="dose-hint" style="margin:-.625rem 0 .875rem"></p>
+    </div>
 
     <div class="field"><label>Days</label>${dayPicker(s.daysOfWeek)}</div>
 
@@ -212,6 +226,18 @@ export async function renderSchedules(context) {
     const formEl = editor.querySelector('#schedule-form');
     formEl.querySelector('[data-act="cancel"]').addEventListener('click', closeEditor);
 
+    // Keep the derived dose visible as the time is changed, so moving a
+    // schedule across noon does not quietly change what she hears at the end of
+    // the call.
+    const timeInput = formEl.querySelector('#f-time');
+    const doseHint  = formEl.querySelector('#dose-hint');
+    const syncDose = () => {
+      const dose = doseFor(timeInput.value);
+      doseHint.textContent = `Counts as the ${dose} dose — she'll hear “${GOODBYE[dose]}”`;
+    };
+    timeInput.addEventListener('input', syncDose);
+    syncDose();
+
     formEl.querySelector('[data-act="delete"]')?.addEventListener('click', async () => {
       if (!confirmAction(`Delete "${schedule.name}"? Calls already placed stay in the history.`)) return;
       try {
@@ -232,6 +258,9 @@ export async function renderSchedules(context) {
       // The day toggles are checkboxes outside the name-based read, so they are
       // gathered separately into the array the API expects.
       data.daysOfWeek = [...formEl.querySelectorAll('[data-group="days"]:checked')].map((i) => Number(i.value));
+      // Derived, not asked for. Still sent because the API requires it on
+      // create and the call path reads it on every call.
+      data.dose = doseFor(data.timeOfDay);
 
       const submit = formEl.querySelector('[type="submit"]');
       submit.disabled = true;
