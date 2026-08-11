@@ -375,6 +375,89 @@ router.post('/escalation-response', async (req, res) => {
   res.type('text/xml').send(r.toString());
 });
 
+// ─── SMS delivery status ─────────────────────────────────────────────────────
+//
+// messages.create() resolving means Twilio ACCEPTED the message. It does not
+// mean anybody received it — delivery succeeds or fails minutes later, and the
+// only way to hear about it is this callback.
+//
+// Nothing listened for a week, and eleven missed-dose alerts were recorded as
+// SENT while every one of them was being rejected by the carrier (error 30034,
+// unregistered A2P 10DLC sender). The history screen said the caregiver had been
+// told. He had not.
+
+// Twilio's message status → the outcome this row should end at, or null for
+// "not terminal, leave the row alone".
+//
+// `sent` deliberately maps to null. For an SMS it means "handed to the carrier",
+// which is precisely the moment the old code called the job done — and it is
+// BEFORE the carrier gets its say. Treating it as success is the original bug.
+//
+// Anything unrecognised is also null rather than a guess: if Twilio adds a
+// status, the right response is to leave a real outcome untouched, not to
+// overwrite it with something invented here.
+function messageOutcome(status, _errorCode) {
+  switch (String(status ?? '').trim().toLowerCase()) {
+    case 'delivered':   return 'DELIVERED';
+    case 'undelivered': // carrier refused it — 30034 and friends
+    case 'failed':      return 'FAILED';
+    default:            return null;
+  }
+}
+
+const isTerminalMessageStatus = (status) => messageOutcome(status) !== null;
+
+// POST /webhook/sms-status — Twilio's delivery receipt for an escalation text.
+router.post('/sms-status', async (req, res) => {
+  const sid     = req.body.MessageSid || req.body.SmsSid || '';
+  const status  = req.body.MessageStatus || req.body.SmsStatus || '';
+  const errCode = req.body.ErrorCode || '';
+
+  // Answered immediately and unconditionally. Twilio retries a callback it
+  // considers failed, and a slow or erroring receipt handler would turn one
+  // undelivered text into a stream of duplicate callbacks.
+  res.sendStatus(204);
+
+  const outcome = messageOutcome(status, errCode);
+  if (!outcome) {
+    logger.info('SMS status (not terminal)', { sid, status });
+    return;
+  }
+
+  try {
+    const updated = await callHistoryRepo.recordDeliveryOutcome(sid, outcome, {
+      errorCode: errCode,
+      // Twilio's own wording is not in the callback body — only the code — so
+      // the code travels and whoever reads the row can look it up.
+      errorMessage: errCode ? `Twilio ${status} (error ${errCode})` : `Twilio reported ${status}`,
+    });
+
+    if (!updated) {
+      // Not necessarily wrong: a verification code's SID is not in call_history
+      // at all, and those callbacks land here too.
+      logger.info('SMS status for a message with no call_history row', { sid, status, errCode });
+      return;
+    }
+
+    if (outcome === 'FAILED') {
+      // Deliberately loud, and deliberately spelling out the consequence. This
+      // is the line whose absence hid the original failure — an alert about a
+      // missed dose that itself went missing is the worst outcome this system
+      // has, and it should never again be visible only in Twilio's console.
+      logger.error('ALERT TEXT NOT DELIVERED — the caregiver was NOT reached by SMS', {
+        sid, status, errorCode: errCode,
+        hint: errCode === '30034'
+          ? 'error 30034: this Twilio number is not registered for A2P 10DLC, so US carriers are blocking every text it sends'
+          : 'check the Twilio console for this message SID',
+      });
+    } else {
+      logger.call('Alert text delivered', { sid });
+    }
+  } catch (err) {
+    logger.error('Could not record SMS delivery status', { sid, status, error: err.message });
+  }
+});
+
 // Called by Twilio for call status updates (no-answer, busy, failed, completed)
 // POST /webhook/status?dose=morning&attempt=1[&sched=&ch=&mr=&k=&fu=]
 router.post('/status', async (req, res) => {
@@ -439,3 +522,5 @@ module.exports.contextQuery       = contextQuery;
 module.exports.escalationMessage  = escalationMessage;
 module.exports.answeredByMachine  = answeredByMachine;
 module.exports.voicemailTwiml     = voicemailTwiml;
+module.exports.messageOutcome     = messageOutcome;
+module.exports.isTerminalMessageStatus = isTerminalMessageStatus;

@@ -120,11 +120,20 @@ export function relative(value) {
 
 // ── Outcomes ───────────────────────────────────────────────────────────────
 
-// How each call_history outcome should read and colour. CONFIRMED and SENT are
-// the only two that mean the system did its job.
+// How each call_history outcome should read and colour.
+//
+// SENT used to read "Alert sent" in green, and it was the most misleading thing
+// on this screen: it means Twilio accepted the message, which is not the same as
+// anyone receiving it. Eleven alerts showed that green tick while the carrier
+// was rejecting every one of them.
+//
+// So SENT is now amber and says so — it is a message in flight, not a job done.
+// DELIVERED is the green one, because a carrier receipt is the only evidence
+// that a caregiver's phone actually buzzed.
 const OUTCOMES = {
   CONFIRMED:     { label: 'Confirmed',      kind: 'ok'   },
-  SENT:          { label: 'Alert sent',     kind: 'ok'   },
+  DELIVERED:     { label: 'Alert delivered', kind: 'ok'  },
+  SENT:          { label: 'Alert sending',  kind: 'warn' },
   PENDING:       { label: 'In progress',    kind: 'warn' },
   NOT_CONFIRMED: { label: 'Not confirmed',  kind: 'bad'  },
   NO_ANSWER:     { label: 'No answer',      kind: 'bad'  },

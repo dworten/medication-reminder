@@ -542,11 +542,23 @@ async function deliverEscalation(row) {
   );
   const sid = await smsAlert.send(to, body);
 
+  // The SID goes on FIRST, before the outcome.
+  //
+  // It is the only handle /webhook/sms-status has to find this row, and Twilio
+  // can deliver a receipt within milliseconds. Attaching it last — as this did —
+  // leaves a window in which a delivery failure arrives, matches nothing, and is
+  // logged as an orphan. Small window, but the thing lost in it is the news that
+  // a missed-dose alert never arrived.
+  if (sid) await callHistoryRepo.attachCallSid(row.id, sid);
   await callHistoryRepo.recordDestination(row.id, to);
   await callHistoryRepo.recordOutcome(row.id, 'SENT');
-  if (sid) await callHistoryRepo.attachCallSid(row.id, sid);
 
-  logger.call('Escalation delivered', { callHistoryId: row.id, to, dose: row.dose });
+  // SENT, not "delivered": Twilio has accepted it and the carrier has not yet
+  // had its say. /webhook/sms-status upgrades this to DELIVERED or knocks it
+  // down to FAILED when the receipt arrives.
+  logger.call('Escalation handed to Twilio, awaiting delivery receipt', {
+    callHistoryId: row.id, to, dose: row.dose, sid,
+  });
 }
 
 // Called by the sweeper for a queued ESCALATION_CALL row: ring the fallback

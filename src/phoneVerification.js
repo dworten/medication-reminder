@@ -174,6 +174,11 @@ async function sendVerificationSms(to, code) {
   const client = _twilioClient();
   const msg = await client.messages.create({
     to, from: config.twilioFromNumber, body: smsBody(code),
+    // Same receipt the escalation texts ask for. There is no call_history row
+    // for a verification, so the callback will not match anything and will say
+    // so — but a carrier rejection still reaches the log, which is how anyone
+    // finds out that "the code never arrived" means 30034 rather than a typo.
+    ...require('./smsAlert').statusCallbackParam(),
   });
   return msg.sid;
 }

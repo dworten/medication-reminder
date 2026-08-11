@@ -24,8 +24,14 @@ const TZ = (process.env.TIMEZONE || 'America/Chicago').trim();
 
 // The outcomes that mean a dose was confirmed, versus the ones that mean nobody
 // could tell. Anything unconfirmed is what you are actually scanning for.
-const GOOD = new Set(['CONFIRMED', 'SENT']);
-const OPEN = new Set(['PENDING']);
+//
+// SENT moved out of GOOD. It means Twilio accepted an alert text, not that
+// anyone received it — the carrier's verdict comes later, as DELIVERED or
+// FAILED. Scanning this output for trouble and seeing "ok" against eleven texts
+// the carrier had rejected is exactly how a week of silent failures stayed
+// silent, so an unconfirmed delivery now reads as in-flight rather than fine.
+const GOOD = new Set(['CONFIRMED', 'DELIVERED']);
+const OPEN = new Set(['PENDING', 'SENT']);
 
 function mark(outcome) {
   if (GOOD.has(outcome)) return 'ok  ';

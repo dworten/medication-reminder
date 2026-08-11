@@ -270,6 +270,39 @@ async function makeDueNow(id, now = new Date()) {
   return result.count === 1;
 }
 
+// A carrier's verdict on a text, arriving minutes after it was handed over.
+//
+// Looked up by SID rather than by row id because that is all the callback
+// carries — Twilio knows nothing about call_history. Returns false when no row
+// matches, which is normal rather than an error: verification codes are sent
+// through the same Twilio number and have no call_history row at all.
+//
+// The outcome filter makes this forward-only. Twilio can deliver callbacks out
+// of order and will retry ones it thinks failed, so without it a late `sent`
+// could overwrite a `FAILED` that had already been recorded — turning the
+// discovery that an alert went missing back into a report that it was fine.
+// PENDING is included because a status can beat the SENT write in a race.
+async function recordDeliveryOutcome(callSid, outcome, { errorCode, errorMessage } = {}) {
+  if (!callSid) return false;
+
+  const result = await db.getClient().callHistory.updateMany({
+    where: {
+      callSid,
+      outcome: { in: ['PENDING', 'SENT'] },
+    },
+    data: {
+      outcome,
+      completedAt: new Date(),
+      ...(errorMessage && { errorMessage }),
+    },
+  });
+
+  if (result.count && errorCode) {
+    logger.warn('Message reported as not delivered', { callSid, outcome, errorCode });
+  }
+  return result.count > 0;
+}
+
 // Cheap re-read of a row's current state, for the narrow window between the
 // sweeper claiming a follow-up SMS and delivering it.
 async function currentOutcome(id) {
@@ -327,5 +360,5 @@ module.exports = {
   scheduleRetry, findDueWork, claimWork, completeWork, releaseClaim,
   enqueueEscalation, countPendingWork, SWEEP_INCLUDE,
   findChildByKind, chainFrom, makeDueNow, currentOutcome,
-  recordDestination, listForAccount,
+  recordDestination, listForAccount, recordDeliveryOutcome,
 };

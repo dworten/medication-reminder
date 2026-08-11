@@ -96,7 +96,13 @@ enum CallOutcome {
   NO_ANSWER
   BUSY
   FAILED // Twilio rejected it, or the API call threw
-  SENT // ESCALATION_SMS delivered to Twilio
+  // Handed to Twilio and accepted. NOT proof anyone received it — for an SMS
+  // that verdict comes minutes later, from the carrier, via /webhook/sms-status.
+  // Reading SENT as success is what hid a week of undelivered alerts.
+  SENT
+  // The carrier confirmed it arrived. The only outcome that actually means a
+  // caregiver's phone buzzed.
+  DELIVERED
   CANCELED
 
   @@map("call_outcome")

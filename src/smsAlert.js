@@ -21,6 +21,27 @@ function _twilioClient() {
   return twilio(config.twilioAccountSid, config.twilioAuthToken);
 }
 
+// Where Twilio should report this message's fate.
+//
+// Returns nothing at all unless the base URL is public https. Twilio rejects a
+// statusCallback it considers unreachable, and rejecting the whole message
+// because of a bookkeeping parameter would mean a missed-dose alert not going
+// out for the sake of knowing whether it went out. This module's rule is the
+// same as call_history's: the alert wins, always.
+function statusCallbackParam() {
+  if (!config.baseUrl.startsWith('https://')) {
+    logger.warn('No SMS delivery receipts — BASE_URL is not public https', {
+      baseUrl: config.baseUrl,
+      effect:  'an undelivered alert text will not be recorded as failed',
+    });
+    return {};
+  }
+
+  return {
+    statusCallback: `${config.baseUrl}/webhook/sms-status`,
+  };
+}
+
 async function send(to, body) {
   logger.call('SMS alert', { to, mode: config.mockMode ? 'mock' : 'real', body });
 
@@ -50,11 +71,24 @@ async function send(to, body) {
   }
 
   const client = _twilioClient();
-  const msg    = await client.messages.create({ to, from: config.twilioFromNumber, body });
-  logger.call('SMS sent', { sid: msg.sid, to });
-  // Returned so the escalation's call_history row can record the Message SID,
-  // which is what you would search Twilio's logs by.
+
+  const msg = await client.messages.create({
+    to,
+    from: config.twilioFromNumber,
+    body,
+    ...statusCallbackParam(),
+  });
+
+  // Deliberately no longer "SMS sent". Twilio has ACCEPTED this message; whether
+  // it reaches a handset is decided later by the carrier and reported to
+  // /webhook/sms-status. Saying "sent" here is what made a week of undelivered
+  // alerts look like a week of delivered ones.
+  logger.call('SMS accepted by Twilio (delivery not yet confirmed)', { sid: msg.sid, to });
+
+  // Returned so the escalation's call_history row can record the Message SID —
+  // both to search Twilio's logs by, and because it is the only handle the
+  // delivery receipt will arrive with.
   return msg.sid;
 }
 
-module.exports = { send };
+module.exports = { send, statusCallbackParam };

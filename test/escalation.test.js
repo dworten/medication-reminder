@@ -308,6 +308,68 @@ async function main() {
   check('then the SMS', chain[1].kind, 'ESCALATION_SMS');
   check('the SMS hangs off the call, not the reminder', chain[1].parentId, chain[0].id);
 
+  // ── Delivery receipts ─────────────────────────────────────────────────────
+  //
+  // Regression tests for a week-long silent failure: every escalation text
+  // between 4 and 11 August was rejected by the carrier (error 30034) and all
+  // eleven were recorded as SENT. The app asked Twilio to accept a message and
+  // then reported that as though it had arrived.
+
+  section('an alert text is not "delivered" just because Twilio took it');
+  sched = await reset({ withCall: false, withSms: true });
+  reminder = await exhaustedReminder();
+  await callManager.escalate('morning', 'no answer after all 3 attempts', sched, {
+    callHistoryId: reminder.id,
+  });
+  await waitFor(async () =>
+    (await prisma.callHistory.count({ where: { kind: 'ESCALATION_SMS', outcome: 'SENT' } })) === 1);
+
+  smsRow = await prisma.callHistory.findFirst({ where: { kind: 'ESCALATION_SMS' } });
+  check('recorded as SENT, not DELIVERED', smsRow.outcome, 'SENT');
+  // The SID must be on the row already — it is the only handle the delivery
+  // receipt arrives with, and Twilio can send one within milliseconds.
+  check('and the SID is attached ready for the receipt', smsRow.callSid, 'FAKE_SMS_SID');
+
+  section('a carrier rejection turns SENT into FAILED');
+  let flipped = await repo.recordDeliveryOutcome('FAKE_SMS_SID', 'FAILED', {
+    errorCode: '30034', errorMessage: 'Twilio undelivered (error 30034)',
+  });
+  check('the row was found by SID', flipped, true);
+  smsRow = await prisma.callHistory.findUnique({ where: { id: smsRow.id } });
+  check('outcome is FAILED', smsRow.outcome, 'FAILED');
+  check('and says why', smsRow.errorMessage, 'Twilio undelivered (error 30034)');
+
+  section('a late or duplicate receipt cannot un-fail it');
+  // Twilio retries callbacks and can deliver them out of order. Without the
+  // forward-only guard, a stale `sent` would overwrite the discovery that the
+  // alert never arrived — putting the original bug straight back.
+  flipped = await repo.recordDeliveryOutcome('FAKE_SMS_SID', 'DELIVERED');
+  check('the update matched nothing', flipped, false);
+  smsRow = await prisma.callHistory.findUnique({ where: { id: smsRow.id } });
+  check('still FAILED', smsRow.outcome, 'FAILED');
+
+  section('a receipt for a message we have no row for is not an error');
+  // Verification codes go out through the same Twilio number and have no
+  // call_history row at all, so their receipts land here and must be harmless.
+  check('reports no match rather than throwing',
+    await repo.recordDeliveryOutcome('SID_THAT_IS_NOT_OURS', 'FAILED'), false);
+  check('and a missing SID is refused outright',
+    await repo.recordDeliveryOutcome(null, 'FAILED'), false);
+
+  section('a delivered receipt is the one thing that means it arrived');
+  sched = await reset({ withCall: false, withSms: true });
+  reminder = await exhaustedReminder();
+  await callManager.escalate('evening', 'no answer after all 3 attempts', sched, {
+    callHistoryId: reminder.id,
+  });
+  await waitFor(async () =>
+    (await prisma.callHistory.count({ where: { kind: 'ESCALATION_SMS', outcome: 'SENT' } })) === 1);
+
+  check('upgraded from SENT',
+    await repo.recordDeliveryOutcome('FAKE_SMS_SID', 'DELIVERED'), true);
+  smsRow = await prisma.callHistory.findFirst({ where: { kind: 'ESCALATION_SMS' } });
+  check('outcome is DELIVERED', smsRow.outcome, 'DELIVERED');
+
   section('a schedule that escalates with neither step alerts nobody, loudly');
   sched = await reset({ withCall: false, withSms: false });
   reminder = await exhaustedReminder();
