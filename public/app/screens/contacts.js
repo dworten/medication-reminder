@@ -8,29 +8,29 @@
 import { api } from '../api.js';
 import {
   node, esc, badge, toast, confirmAction, readForm,
-  showFieldErrors, clearFieldErrors, formatWhen,
+  showFieldErrors, clearFieldErrors,
 } from '../ui.js';
-import { refresh, context } from '../app.js';
+import { refresh } from '../app.js';
 import { channelField, mountCodeStep } from './verify.js';
 
 const ROLE_LABEL = { RECIPIENT: 'Recipient', CAREGIVER: 'Caregiver', BOTH: 'Both' };
 
-const VERIFIED_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm3.7 5.9-4.2 4.8a.9.9 0 0 1-1.3.05L3.9 8.5a.9.9 0 1 1 1.2-1.3l1.6 1.5 3.6-4.1a.9.9 0 0 1 1.4 1.2Z"/></svg>';
-const PENDING_ICON  = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm.9 7.6 2.4 1.4a.9.9 0 1 1-.9 1.6L7.6 9a.9.9 0 0 1-.5-.8V4a.9.9 0 1 1 1.8 0v3.6Z"/></svg>';
+const WARN_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm.9 7.6 2.4 1.4a.9.9 0 1 1-.9 1.6L7.6 9a.9.9 0 0 1-.5-.8V4a.9.9 0 1 1 1.8 0v3.6Z"/></svg>';
 
-// Icon, word AND colour — never colour alone. Someone reading this in greyscale,
-// or who cannot tell the green from the amber, still gets the state from the
-// shape and the text.
-function verifiedBadge(contact) {
-  if (!contact.phoneVerifiedAt) {
-    return `<span class="badge badge-bad">${PENDING_ICON}Unverified</span>`;
-  }
-  const grandfathered = contact.phoneVerifiedVia === 'GRANDFATHERED';
-  const title = grandfathered
-    ? 'In use before verification existed — never challenged with a code'
-    : `Verified by ${contact.phoneVerifiedVia === 'CALL' ? 'phone call' : 'text'} on ${formatWhen(contact.phoneVerifiedAt, context.account?.timezone)}`;
-
-  return `<span class="badge badge-ok" title="${esc(title)}">${VERIFIED_ICON}Verified</span>`;
+// Deliberately silent when everything is fine.
+//
+// A contact only exists here because a code came back, so a "Verified" badge on
+// every card would be a label that is always true — decoration that costs a line
+// of vertical space on every row and tells you nothing you could act on.
+//
+// What IS worth interrupting someone for is the state that should not be
+// possible: a contact whose number nobody ever proved. That cannot be reached
+// through the app, but a restored backup or a row typed into Prisma Studio can
+// produce it, and it is exactly the case where the interface going quiet would
+// be a lie. Icon, word and colour together, so it survives greyscale.
+function verificationWarning(contact) {
+  if (contact.phoneVerifiedAt) return '';
+  return `<span class="badge badge-bad">${WARN_ICON}Unverified</span>`;
 }
 
 function card(contact) {
@@ -43,7 +43,7 @@ function card(contact) {
       <div class="card-actions"><button class="small" data-act="edit">Edit</button></div>
     </div>
     <p class="tag-row">
-      ${verifiedBadge(contact)}
+      ${verificationWarning(contact)}
       ${badge(ROLE_LABEL[contact.role] || contact.role, 'info')}
       ${contact.isActive ? '' : badge('Inactive', 'off')}
     </p>
@@ -135,7 +135,7 @@ function editContactForm(contact) {
         <label for="c-phone-display">Phone</label>
         <div class="locked-field">
           <span id="c-phone-display" class="locked-value">${esc(contact.phone)}</span>
-          ${verifiedBadge(contact)}
+          ${verificationWarning(contact)}
         </div>
         <p class="small muted">
           ${contact.pendingPhone
