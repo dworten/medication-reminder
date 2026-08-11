@@ -7,9 +7,10 @@
 // hardest: a bad row here is not a broken page, it is a missed dose or a call
 // at the wrong hour.
 
-const express = require('express');
-const repo    = require('../data/schedules');
-const logger  = require('../logger');
+const express     = require('express');
+const repo        = require('../data/schedules');
+const contactRepo = require('../data/contacts');
+const logger      = require('../logger');
 const { nextRunAt } = require('../scheduleMatch');
 const { asyncHandler, notFound, badRequest } = require('./errors');
 const { scheduleInput } = require('./validate');
@@ -27,21 +28,33 @@ function present(schedule, now = new Date()) {
   return { ...schedule, nextRunAt: nextRunAt(schedule, now) };
 }
 
-// A schedule's contact and message must belong to the same account. The foreign
-// key only proves the row exists — it says nothing about whose it is, so
-// without this a caller could aim their schedule at another account's contact
-// and have this app phone a stranger.
+// A schedule's contact and message must belong to the same account, and any
+// contact it will ring must have a verified number.
+//
+// The ownership half matters because a foreign key only proves the row exists —
+// it says nothing about whose it is, so without this a caller could aim their
+// schedule at another account's contact and have this app phone a stranger.
+//
+// The verification half is also enforced by a database trigger, which is the
+// real guarantee — this exists to make the refusal readable. A trigger can only
+// say "unverified"; this says which field, by name, in the same shape every
+// other validation error in this API uses, so the form can highlight the
+// offending select rather than showing a banner.
 async function assertOwnedReferences(accountId, data) {
   const errors = {};
 
   if (data.contactId !== undefined && data.contactId !== null) {
     if (!(await repo.belongsToAccount('contact', accountId, data.contactId))) {
       errors.contactId = 'no such contact';
+    } else if (!(await contactRepo.isVerified(accountId, data.contactId))) {
+      errors.contactId = 'that contact\'s phone number is not verified yet — verify it before a schedule can call it';
     }
   }
   if (data.escalationContactId) {
     if (!(await repo.belongsToAccount('contact', accountId, data.escalationContactId))) {
       errors.escalationContactId = 'no such contact';
+    } else if (!(await contactRepo.isVerified(accountId, data.escalationContactId))) {
+      errors.escalationContactId = 'that contact\'s phone number is not verified yet — verify it before it can receive alerts';
     }
   }
   if (data.messageId) {

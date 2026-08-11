@@ -28,6 +28,7 @@ prisma/
 scripts/
   history.js        `npm run db:history` — recent attempts, escalation chains indented
   set-password.js   `npm run set-password` — the only way an account gets one
+  verify-contacts.js `npm run verify-contacts` — the verification stamp, by hand
 src/
   session.js        Session cookie config, Postgres-backed store
   api/
@@ -35,6 +36,7 @@ src/
     auth.js         /login /logout /me, plus the requireAuth guard
     validate.js     Input rules, mirroring the database's CHECK constraints
     errors.js       One error shape; Prisma failures → the right HTTP status
+    contactVerifications.js  Send a code, check a code; where contacts are born
     contacts.js  messages.js  schedules.js  callHistory.js
   db.js             Shared PrismaClient (lazy; the app boots without a database)
   generated/prisma  Generated client — gitignored, rebuilt by `prisma generate`
@@ -48,11 +50,54 @@ src/
   security.js       Twilio signature validation + /trigger secret
   mockMode.js       Interactive terminal simulation (local only)
   smsAlert.js       Sends SMS via Twilio (or prints a box in mock mode)
+  phoneVerification.js  6-digit codes: generate, hash, deliver, rate limit
   data/             Database access, the seam Phase 3's API sits on
     accounts.js     Account lookups
     schedules.js    Schedule reads + the atomic fire-claim
     callHistory.js  Per-attempt records (best-effort: never blocks a call)
+    contactVerifications.js  Codes, and the two transactions that spend them
 ```
+
+### Phone number verification
+
+A contact's phone number is never taken on trust. A 6-digit code goes to it — by
+text, or by a voice call that reads the digits aloud twice — and **the contact
+does not exist until that code comes back**. There is no way to add a contact
+with an unverified number, and a schedule cannot reference one.
+
+Changing a number is the same idea, arranged so nothing stops. The new number
+waits in `contacts.pending_phone` while `contacts.phone` keeps its verified value
+and keeps ringing; the two swap only when a code checks out. A typo is never
+dialled, and a live schedule never goes quiet while someone re-verifies.
+
+```
+contacts.phone          only ever a number that passed a code
+contacts.pending_phone  a proposal — never called, never texted
+```
+
+The rule is enforced three times over: the schedules API refuses an unverified
+reference with a named field error, a database trigger refuses it past the API
+entirely, and a second trigger refuses to un-verify a contact a schedule is
+still using.
+
+**The trigger is guarded on the reference actually changing** (`IS DISTINCT
+FROM`), and that guard is load-bearing. The scheduler writes `last_fired_at` on
+every fire; a trigger that could raise on that `UPDATE` would abort the
+fire-claim and silently stop every reminder call. `test/verification.test.js`
+ends with the regression test for exactly this.
+
+Codes are stored as bcrypt hashes, expire in ten minutes, are single-use, and are
+burned after five wrong guesses. Sends are rate limited per number *and* per
+account — the second is the one that bounds the Twilio bill, since capping one
+number does nothing about a thousand different ones. Because only the hash is
+stored, the voice call carries its TwiML inline rather than pointing Twilio at a
+webhook that would have to read a code back it cannot see.
+
+Contacts that predate this feature were stamped `GRANDFATHERED` by the migration
+rather than being made to pass a code — they had been receiving real calls for
+months, which is stronger evidence, but it is *different* evidence and stays
+distinguishable. `npm run verify-contacts` lists the stamps and can add or
+withdraw one.
 
 ### Call flow
 

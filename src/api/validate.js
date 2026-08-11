@@ -21,6 +21,10 @@ const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 const CONTACT_ROLES = new Set(['RECIPIENT', 'CAREGIVER', 'BOTH']);
 const MESSAGE_KINDS = new Set(['TTS', 'AUDIO']);
+// SMS or a spoken call. CALL is not a nicety — the person being reminded may not
+// read a text at all, so a number that can only be verified by SMS is a number
+// that cannot be verified.
+const VERIFICATION_CHANNELS = new Set(['SMS', 'CALL']);
 // The call path keys off this string: it travels in the webhook query string and
 // picks the goodbye line in twimlHandler. A third value would flow all the way
 // to a live call before anything noticed.
@@ -176,6 +180,62 @@ function contactInput(body, opts) {
     .done();
 }
 
+// Everything about a contact EXCEPT the number.
+//
+// Split out because a contact is now assembled in two places at two different
+// times: these fields are collected when the code is requested and parked on the
+// verification row, and the phone arrives from the verification itself when the
+// code checks out. Running the same validator over the parked draft on the way
+// back out is what stops anything unchecked reaching the contacts table if that
+// JSON is ever edited by hand.
+function contactDraftInput(body, opts) {
+  return new Check(body, opts)
+    .field('name',  { required: true }, str(120))
+    .field('notes', { optional: true }, str(1000))
+    .field('role',  {}, oneOf(CONTACT_ROLES, 'role'))
+    .field('isActive', {}, bool)
+    .done();
+}
+
+// Starting a verification for a number that has no contact yet — the create
+// flow. The contact's other fields ride along and are held until the code is
+// entered, so a verified number never lands in a list with no name on it.
+function verificationStartInput(body) {
+  const { phone: number, channel } = new Check(body)
+    .field('phone',   { required: true }, phone)
+    .field('channel', { required: true }, oneOf(VERIFICATION_CHANNELS, 'channel'))
+    .done();
+
+  return { phone: number, channel, draft: contactDraftInput(body) };
+}
+
+// Starting a verification for an existing contact's new number — the change
+// flow. No draft: the contact already has a name.
+function verificationChangeInput(body) {
+  return new Check(body)
+    .field('phone',   { required: true }, phone)
+    .field('channel', { required: true }, oneOf(VERIFICATION_CHANNELS, 'channel'))
+    .done();
+}
+
+// Exactly six digits. Trimmed and stripped of the spaces and dashes people type
+// when reading a code back off a phone call, since "482 915" is the same code as
+// "482915" and rejecting it would burn one of five attempts on a formatting
+// difference.
+function verificationCheckInput(body) {
+  const raw = body?.code;
+  if (typeof raw !== 'string' && typeof raw !== 'number') {
+    throw badRequest('Validation failed', { code: 'is required' });
+  }
+
+  const code = String(raw).replace(/[\s-]/g, '');
+  if (!/^\d{6}$/.test(code)) {
+    throw badRequest('Validation failed', { code: 'must be the 6-digit code' });
+  }
+
+  return { code };
+}
+
 // A message must be usable by the call path: TTS with nothing to say, or AUDIO
 // with nothing to play, is a row that silently falls back to the built-in
 // prompt. Rejecting it here is the difference between a caught mistake and a
@@ -300,6 +360,7 @@ function callHistoryQuery(query = {}) {
 }
 
 module.exports = {
-  contactInput, messageInput, scheduleInput, callHistoryQuery, signupInput,
+  contactInput, contactDraftInput, messageInput, scheduleInput, callHistoryQuery, signupInput,
+  verificationStartInput, verificationChangeInput, verificationCheckInput,
   isValidTimezone, E164, HHMM,
 };

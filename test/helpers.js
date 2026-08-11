@@ -62,6 +62,28 @@ async function waitFor(predicate, { timeoutMs = 5000, everyMs = 25 } = {}) {
   return false;
 }
 
+// A fixture contact, carrying a verification stamp.
+//
+// Not a convenience. A database trigger refuses to attach an unverified contact
+// to a schedule, so an unstamped fixture makes every schedule insert in every
+// suite fail — which is the correct behaviour under test and useless as a
+// starting state. Stamped GRANDFATHERED because that is what these are: numbers
+// asserted by the fixture rather than proved by a code.
+//
+// Takes the same argument shape as prisma.contact.create so the call sites read
+// unchanged, and so a suite that WANTS an unverified contact can pass
+// phoneVerifiedAt: null and override it.
+async function makeContact(prisma, args) {
+  return prisma.contact.create({
+    ...args,
+    data: {
+      phoneVerifiedAt:  new Date(),
+      phoneVerifiedVia: 'GRANDFATHERED',
+      ...args.data,
+    },
+  });
+}
+
 async function truncateAll(prisma) {
   // FK-safe order: schedules reference contacts with RESTRICT.
   // call_history rows reference each other via parent_id, so they go first as a
@@ -69,8 +91,14 @@ async function truncateAll(prisma) {
   await prisma.callHistory.deleteMany({});
   await prisma.schedule.deleteMany({});
   await prisma.message.deleteMany({});
+  // Cascades from contacts and accounts would take these anyway; deleting them
+  // explicitly keeps the order readable rather than load-bearing.
+  await prisma.contactVerification.deleteMany({});
   await prisma.contact.deleteMany({});
   await prisma.account.deleteMany({});
 }
 
-module.exports = { check, contains, section, summary, assertScratchDatabase, truncateAll, waitFor };
+module.exports = {
+  check, contains, section, summary,
+  assertScratchDatabase, truncateAll, waitFor, makeContact,
+};

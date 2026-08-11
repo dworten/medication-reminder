@@ -18,7 +18,8 @@
     "db:studio": "prisma studio",
     "db:seed": "prisma db seed",
     "db:history": "node scripts/history.js",
-    "set-password": "node scripts/set-password.js"
+    "set-password": "node scripts/set-password.js",
+    "verify-contacts": "node scripts/verify-contacts.js"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",

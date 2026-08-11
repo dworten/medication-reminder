@@ -71,9 +71,20 @@ export const api = {
 
   contacts: {
     list:   ()          => request('GET',    '/api/contacts'),
-    create: (data)      => request('POST',   '/api/contacts', data),
+    // No create(). A contact comes into being when its code checks out, so the
+    // thing that returns a new contact is checkCode() below — there is
+    // deliberately no path from this client to an unverified number.
     update: (id, data)  => request('PATCH', `/api/contacts/${id}`, data),
     remove: (id)        => request('DELETE', `/api/contacts/${id}`),
+
+    // Verification. startVerification is for a number with no contact yet;
+    // startNumberChange is for an existing contact moving to a new one. Both
+    // send a code and return a verification; both are finished by checkCode.
+    startVerification: (data)     => request('POST', '/api/contacts/verifications', data),
+    startNumberChange: (id, data) => request('POST', `/api/contacts/${id}/verifications`, data),
+    checkCode: (verificationId, code) =>
+      request('POST', `/api/contacts/verifications/${verificationId}/check`, { code }),
+    cancelPending: (id) => request('DELETE', `/api/contacts/${id}/pending`),
   },
 
   messages: {

@@ -657,6 +657,52 @@ button[disabled]:hover { background: var(--off-soft); border-color: var(--line);
 }
 .loading { padding: 3rem 1rem; text-align: center; color: var(--muted); }
 
+/* ── Phone verification ──────────────────────────────────────────────────── */
+
+/* The channel picker. A fieldset rather than a styled div so the legend is read
+   as the question these two radios answer, instead of the radios arriving with
+   no context. */
+.channel-choice { border: 0; padding: 0; margin: 0 0 1rem; }
+.channel-choice legend {
+  padding: 0; margin: 0 0 .3125rem;
+  font-size: var(--text-sm); font-weight: 600; color: var(--fg);
+}
+.channel-choice .checkline { align-items: flex-start; }
+.channel-choice .checkline input { margin-top: .1875rem; }
+.channel-choice .checkline span { font-size: var(--text-sm); line-height: 1.45; }
+
+/* Six digits read off a phone call and typed back. Wide, spaced and tabular so
+   a transposed pair is visible before it costs one of five attempts. */
+.code-input {
+  max-width: 12ch;
+  font-size: 1.75rem; font-weight: 700;
+  letter-spacing: .35em; text-indent: .35em;
+  text-align: center; font-variant-numeric: tabular-nums;
+  min-height: 3.5rem;
+}
+.code-field #countdown { margin: -.5rem 0 0; font-variant-numeric: tabular-nums; }
+
+/* The phone on the edit form: shown, not editable, with the badge beside it so
+   "why can I not type here" and "this number is verified" are the same glance. */
+.locked-field {
+  display: flex; align-items: center; gap: .625rem; flex-wrap: wrap;
+  padding: .5rem .625rem; margin-bottom: .5rem;
+  min-height: 2.75rem;
+  background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.locked-value { font-weight: 600; }
+
+/* A number change in flight. Amber-bordered rather than red: nothing is broken
+   and nothing has stopped — the old number is still being called — so this is a
+   thing to finish, not a thing to fix. */
+.pending-note {
+  margin: .75rem 0 0; padding: .625rem .75rem;
+  background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  border-radius: var(--radius-sm);
+}
+.pending-note p { margin: 0; }
+.pending-note .button-row { margin-top: .625rem; }
+
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: .01ms !important; animation-duration: .01ms !important; scroll-behavior: auto !important; }
 }

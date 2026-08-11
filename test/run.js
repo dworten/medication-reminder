@@ -21,6 +21,7 @@ const SUITES = [
   ['sweeper',       'sweeper.test.js',       'needs DATABASE_URL'],
   ['escalation',    'escalation.test.js',    'needs DATABASE_URL'],
   ['api',           'api.test.js',           'needs DATABASE_URL'],
+  ['verification',  'verification.test.js',  'needs DATABASE_URL'],
   ['server',        'server.test.js',        'boots app.js on a port'],
 ];
 

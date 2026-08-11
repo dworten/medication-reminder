@@ -1,5 +1,5 @@
 'use strict';
-const { check, contains, section, summary, assertScratchDatabase, truncateAll } = require('./helpers');
+const { check, contains, section, summary, assertScratchDatabase, truncateAll, makeContact } = require('./helpers');
 require('dotenv').config();
 
 const db     = require('../src/db');
@@ -32,7 +32,7 @@ async function main() {
   await truncateAll(prisma);
 
   const account = await prisma.account.create({ data: { email: 'twiml@example.test' } });
-  const contact = await prisma.contact.create({ data: { accountId: account.id, name: 'G', phone: '+15125550111' } });
+  const contact = await makeContact(prisma, { data: { accountId: account.id, name: 'G', phone: '+15125550111' } });
   const ttsMsg  = await prisma.message.create({
     data: { accountId: account.id, name: 'Custom', kind: 'TTS', ttsText: 'Grandma, it is time for your morning pills.', isDefault: true },
   });

@@ -1,5 +1,5 @@
 'use strict';
-const { check, section, summary, assertScratchDatabase, truncateAll, waitFor } = require('./helpers');
+const { check, section, summary, assertScratchDatabase, truncateAll, waitFor, makeContact } = require('./helpers');
 require('dotenv').config();
 
 const db          = require('../src/db');
@@ -51,10 +51,10 @@ const fixtures = {};
 
 async function seedFixtures() {
   fixtures.account = await prisma.account.create({ data: { email: 'sweeper@example.test' } });
-  fixtures.contact = await prisma.contact.create({
+  fixtures.contact = await makeContact(prisma, {
     data: { accountId: fixtures.account.id, name: 'Recipient', phone: '+15125550150' },
   });
-  fixtures.caregiver = await prisma.contact.create({
+  fixtures.caregiver = await makeContact(prisma, {
     data: { accountId: fixtures.account.id, name: 'Caregiver', phone: '+15125550160', role: 'CAREGIVER' },
   });
   fixtures.schedule = await prisma.schedule.create({

@@ -9,7 +9,7 @@
 // The case this suite exists for is the last one: a request carrying another
 // account's row id must get 404, not data. Everything else is table stakes.
 
-const { check, contains, section, summary, assertScratchDatabase, truncateAll } = require('./helpers');
+const { check, contains, section, summary, assertScratchDatabase, truncateAll, makeContact } = require('./helpers');
 require('dotenv').config();
 
 const express = require('express');
@@ -28,6 +28,23 @@ const session = require('../src/session');
 const prisma  = db.getClient();
 
 const PASSWORD = 'correct-horse-battery-staple';
+
+// The outbound edge of verification, intercepted the way callManager's
+// placeVoiceCall already is. Everything upstream — generating the code, hashing
+// it, storing it, the rate limits — runs for real; only the request to Twilio is
+// replaced. Capturing the plaintext here is the only way a test can enter the
+// right code, since what gets stored is a hash by design.
+const phoneVerification = require('../src/phoneVerification');
+const sent = { code: null, to: null, channel: null };
+
+phoneVerification.sendVerificationSms = async (to, code) => {
+  Object.assign(sent, { to, code, channel: 'SMS' });
+  return 'SM_test_sid';
+};
+phoneVerification.placeVerificationCall = async (to, code) => {
+  Object.assign(sent, { to, code, channel: 'CALL' });
+  return 'CA_test_sid';
+};
 
 let server, base;
 
@@ -85,13 +102,13 @@ async function seedFixtures() {
     data: { email: 'other@example.test', name: 'Someone Else', passwordHash: hash },
   });
 
-  fixtures.contact = await prisma.contact.create({
+  fixtures.contact = await makeContact(prisma, {
     data: { accountId: fixtures.account.id, name: 'Grandma', phone: '+15125550150' },
   });
-  fixtures.caregiver = await prisma.contact.create({
+  fixtures.caregiver = await makeContact(prisma, {
     data: { accountId: fixtures.account.id, name: 'Caregiver', phone: '+15125550160', role: 'CAREGIVER' },
   });
-  fixtures.otherContact = await prisma.contact.create({
+  fixtures.otherContact = await makeContact(prisma, {
     data: { accountId: fixtures.other.id, name: 'Not Yours', phone: '+15125550190' },
   });
   fixtures.message = await prisma.message.create({
@@ -176,15 +193,25 @@ async function main() {
 
   // ── contacts ──────────────────────────────────────────────────────────────
 
-  section('contacts: list, create, update, delete');
+  section('contacts: list, verify-then-create, update, delete');
   r = await api('GET', '/api/contacts');
   check('lists only my contacts', r.body.contacts.length, 2);
   check('not the other account\'s', r.body.contacts.some(c => c.name === 'Not Yours'), false);
 
-  r = await api('POST', '/api/contacts', { name: 'Neighbour', phone: '+15125550170', role: 'CAREGIVER' });
-  check('created', r.status, 201);
+  // Creating a contact is now two requests: send a code, then enter it. The
+  // contact does not exist in between.
+  r = await api('POST', '/api/contacts/verifications',
+    { name: 'Neighbour', phone: '+15125550170', role: 'CAREGIVER', channel: 'SMS' });
+  check('code sent', r.status, 201);
+  check('never returns the code', r.body.verification.code, undefined);
+  check('no contact yet', (await api('GET', '/api/contacts')).body.contacts.length, 2);
+
+  r = await api('POST', `/api/contacts/verifications/${r.body.verification.id}/check`, { code: sent.code });
+  check('created on a correct code', r.status, 201);
   const newContactId = r.body.contact.id;
   check('stored as given', r.body.contact.phone, '+15125550170');
+  check('and marked verified', Boolean(r.body.contact.phoneVerifiedAt), true);
+  check('recording how', r.body.contact.phoneVerifiedVia, 'SMS');
 
   r = await api('PATCH', `/api/contacts/${newContactId}`, { name: 'Neighbour Pat' });
   check('updated', r.status, 200);
@@ -196,20 +223,37 @@ async function main() {
   r = await api('GET', `/api/contacts/${newContactId}`);
   check('and gone', r.status, 404);
 
+  section('contacts: the unverified back doors are shut');
+  r = await api('POST', '/api/contacts', { name: 'Sneaky', phone: '+15125550171' });
+  check('direct create is 405', r.status, 405);
+  contains('and says what to do instead', JSON.stringify(r.body.details), '/api/contacts/verifications');
+
+  r = await api('PATCH', `/api/contacts/${fixtures.contact.id}`, { phone: '+15125559999' });
+  check('PATCHing a phone is 400', r.status, 400);
+  contains('and points at verification', r.body.details.phone, 'verification');
+  check('number unchanged',
+    (await prisma.contact.findUnique({ where: { id: fixtures.contact.id } })).phone, '+15125550150');
+
   section('contacts: validation, not a 500');
-  r = await api('POST', '/api/contacts', { name: 'Bad', phone: '5125550150' });
+  r = await api('POST', '/api/contacts/verifications', { name: 'Bad', phone: '5125550150', channel: 'SMS' });
   check('400 not 500', r.status, 400);
   contains('names the field', JSON.stringify(r.body.details), 'phone');
   contains('explains E.164', r.body.details.phone, 'E.164');
 
-  r = await api('POST', '/api/contacts', { phone: '+15125550111' });
+  r = await api('POST', '/api/contacts/verifications', { phone: '+15125550111', channel: 'SMS' });
   check('missing name rejected', r.status, 400);
   check('says which field', r.body.details.name, 'is required');
 
-  section('contacts: a duplicate phone is a 409, not a crash');
-  r = await api('POST', '/api/contacts', { name: 'Dup', phone: '+15125550150' });
+  r = await api('POST', '/api/contacts/verifications', { name: 'X', phone: '+15125550112', channel: 'CARRIER PIGEON' });
+  check('unknown channel rejected', r.status, 400);
+  contains('lists the real ones', r.body.details.channel, 'SMS');
+
+  section('contacts: a duplicate phone is a 409, before any code is sent');
+  const sendsBefore = await prisma.contactVerification.count();
+  r = await api('POST', '/api/contacts/verifications', { name: 'Dup', phone: '+15125550150', channel: 'SMS' });
   check('409', r.status, 409);
   contains('says why', r.body.error, 'already exists');
+  check('and nothing was sent', await prisma.contactVerification.count(), sendsBefore);
 
   section('contacts: one still used by a schedule cannot be deleted');
   r = await api('DELETE', `/api/contacts/${fixtures.contact.id}`);

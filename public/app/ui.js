@@ -217,6 +217,15 @@ export function readForm(form, { numbers = [], booleans = [], nullable = [] } = 
     if (!element.name || element.disabled) continue;
     if (element.type === 'checkbox' && element.dataset.group) continue;
 
+    // A radio group is several elements sharing one name, and only the checked
+    // one means anything. Without this the loop keeps overwriting until the LAST
+    // radio wins — which silently returns the wrong answer rather than failing,
+    // and reads as if the control were simply being ignored.
+    if (element.type === 'radio') {
+      if (element.checked) data[element.name] = element.value;
+      continue;
+    }
+
     if (element.type === 'checkbox') { data[element.name] = element.checked; continue; }
 
     const value = element.value.trim();

@@ -11,7 +11,7 @@
 
 const path = require('path');
 const { spawn } = require('child_process');
-const { check, contains, section, summary, assertScratchDatabase, truncateAll } = require('./helpers');
+const { check, contains, section, summary, assertScratchDatabase, truncateAll, makeContact } = require('./helpers');
 require('dotenv').config();
 
 const bcrypt = require('bcryptjs');
@@ -65,7 +65,7 @@ async function seed() {
   fixtures.owner = await prisma.account.create({
     data: { email: ADMIN_EMAIL, passwordHash: hash },
   });
-  const contact = await prisma.contact.create({
+  const contact = await makeContact(prisma, {
     data: { accountId: fixtures.owner.id, name: 'Grandma', phone: '+15125550150' },
   });
   fixtures.ownerSchedule = await prisma.schedule.create({

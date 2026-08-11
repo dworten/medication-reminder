@@ -9,7 +9,7 @@
 // alerted exactly once. Not zero times because a process died mid-chain, and
 // not twice because a webhook arrived twice.
 
-const { check, section, summary, assertScratchDatabase, truncateAll, waitFor } = require('./helpers');
+const { check, section, summary, assertScratchDatabase, truncateAll, waitFor, makeContact } = require('./helpers');
 require('dotenv').config();
 
 const db          = require('../src/db');
@@ -48,10 +48,10 @@ const fixtures = {};
 
 async function seedFixtures({ withCall = true, withSms = true, ackMinutes = 3 } = {}) {
   fixtures.account = await prisma.account.create({ data: { email: 'escalation@example.test' } });
-  fixtures.contact = await prisma.contact.create({
+  fixtures.contact = await makeContact(prisma, {
     data: { accountId: fixtures.account.id, name: 'Grandma', phone: '+15125550150' },
   });
-  fixtures.caregiver = await prisma.contact.create({
+  fixtures.caregiver = await makeContact(prisma, {
     data: { accountId: fixtures.account.id, name: 'Caregiver', phone: '+15125550160', role: 'CAREGIVER' },
   });
   fixtures.schedule = await prisma.schedule.create({
@@ -111,7 +111,7 @@ async function main() {
   section('a call step with nowhere to dial is dropped, not queued to fail');
   await truncateAll(prisma);
   const orphanAccount = await prisma.account.create({ data: { email: 'orphan@example.test' } });
-  const orphanContact = await prisma.contact.create({
+  const orphanContact = await makeContact(prisma, {
     data: { accountId: orphanAccount.id, name: 'Nobody', phone: '+15125550170' },
   });
   const noFallback = await prisma.schedule.create({

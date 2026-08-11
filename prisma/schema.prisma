@@ -50,6 +50,35 @@ enum MessageKind {
   @@map("message_kind")
 }
 
+// How a contact's phone number came to be trusted.
+//
+// GRANDFATHERED exists so the two contacts that predate verification are
+// distinguishable forever from ones that actually passed a code. They were
+// stamped by the migration on the strength of having received real calls for
+// months, which is good evidence — but it is not the same evidence, and
+// flattening the two would make that unrecoverable.
+enum PhoneVerificationMethod {
+  SMS
+  CALL
+  GRANDFATHERED
+
+  @@map("phone_verification_method")
+}
+
+// How a verification code was delivered. Deliberately NOT the same enum as
+// above: a verification can never be GRANDFATHERED, and sharing the type would
+// make that state representable.
+//
+// CALL is not a nicety. The person being reminded is elderly and may not read a
+// text at all, so a number that can only be verified by SMS is a number that
+// cannot be verified.
+enum VerificationChannel {
+  SMS
+  CALL
+
+  @@map("verification_channel")
+}
+
 // What a call_history row represents. Stage 4 logs every escalation step as its
 // own row, so the chain is auditable rather than inferred from a flag.
 enum CallKind {
@@ -61,13 +90,13 @@ enum CallKind {
 }
 
 enum CallOutcome {
-  PENDING       // placed, no terminal status yet
-  CONFIRMED     // she pressed 1 / said yes
+  PENDING // placed, no terminal status yet
+  CONFIRMED // she pressed 1 / said yes
   NOT_CONFIRMED // answered, but never confirmed after all reprompts
   NO_ANSWER
   BUSY
-  FAILED        // Twilio rejected it, or the API call threw
-  SENT          // ESCALATION_SMS delivered to Twilio
+  FAILED // Twilio rejected it, or the API call threw
+  SENT // ESCALATION_SMS delivered to Twilio
   CANCELED
 
   @@map("call_outcome")
@@ -94,10 +123,10 @@ model Session {
 }
 
 model Account {
-  id        String   @id @default(uuid()) @db.Uuid
-  email     String   @unique
-  name      String?
-  timezone  String   @default("America/Chicago")
+  id       String  @id @default(uuid()) @db.Uuid
+  email    String  @unique
+  name     String?
+  timezone String  @default("America/Chicago")
 
   // Set by `npm run set-password`, never by a signup flow — there is one
   // account and it is created by the seed. Nullable on purpose: an account that
@@ -109,10 +138,11 @@ model Account {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  contacts    Contact[]
-  messages    Message[]
-  schedules   Schedule[]
-  callHistory CallHistory[]
+  contacts      Contact[]
+  messages      Message[]
+  schedules     Schedule[]
+  callHistory   CallHistory[]
+  verifications ContactVerification[]
 
   @@map("accounts")
 }
@@ -121,24 +151,116 @@ model Contact {
   id        String      @id @default(uuid()) @db.Uuid
   accountId String      @map("account_id") @db.Uuid
   name      String
-  phone     String // E.164, e.g. +15125550123
+  // E.164, e.g. +15125550123.
+  //
+  // THE INVARIANT: this column only ever holds a number that has passed a
+  // verification code (or was grandfathered in). Nothing writes to it except
+  // the verification check. That is what makes "a schedule cannot call an
+  // unverified number" true by construction rather than by vigilance — a typo
+  // never becomes a live destination, because it never reaches this column.
+  phone     String
   notes     String?
   role      ContactRole @default(RECIPIENT)
   isActive  Boolean     @default(true) @map("is_active")
-  createdAt DateTime    @default(now()) @map("created_at")
-  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  // When `phone` passed its code, and how it was delivered.
+  //
+  // Nullable rather than NOT NULL, even though every row created after this
+  // feature has one set. NULL is the fail-closed state: a row that somehow
+  // arrives without a stamp — a hand-written INSERT in Prisma Studio, a future
+  // migration that forgets — is refused by the schedule trigger rather than
+  // silently trusted. Making it NOT NULL would also make "I no longer trust
+  // this number" impossible to express.
+  phoneVerifiedAt  DateTime?                @map("phone_verified_at")
+  phoneVerifiedVia PhoneVerificationMethod? @map("phone_verified_via")
+
+  // A number waiting on its code. NEVER called, never texted, never resolved by
+  // the call path — it is a proposal, not a destination.
+  //
+  // This column is the whole reason changing a phone number cannot break a live
+  // schedule: the edit lands here, `phone` keeps its verified value and keeps
+  // ringing, and the two swap only when a code comes back correct. Without it,
+  // editing a number would either stop the calls or start sending them to an
+  // unproven number, and both are the failure this feature exists to prevent.
+  pendingPhone String? @map("pending_phone")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   // Restrict, not Cascade: deleting a contact must not silently delete the
   // schedules that call her, or the history of calls already placed.
-  schedulesAsRecipient  Schedule[]    @relation("ScheduleRecipient")
-  schedulesAsEscalation Schedule[]    @relation("ScheduleEscalation")
+  schedulesAsRecipient  Schedule[]            @relation("ScheduleRecipient")
+  schedulesAsEscalation Schedule[]            @relation("ScheduleEscalation")
   callHistory           CallHistory[]
+  verifications         ContactVerification[]
 
   @@unique([accountId, phone])
   @@index([accountId])
   @@map("contacts")
+}
+
+// One attempt to prove that a phone number belongs to whoever is adding it.
+//
+// It is a table rather than an in-memory map for two reasons. The rate limits
+// are counted from it, and an in-memory counter resets on every redeploy — which
+// turns "5 texts per number per hour" into "5 texts per redeploy", on an endpoint
+// that spends the account owner's Twilio balance. And a code that outlived the
+// process that issued it would be a code nobody could check.
+//
+// The code itself is never here. Only a bcrypt hash of it, which is what makes a
+// leak of this table useless: 10^6 candidates at cost 12 is days of work per
+// code, against a code that expires in ten minutes and is burned after five
+// wrong guesses.
+model ContactVerification {
+  id        String @id @default(uuid()) @db.Uuid
+  accountId String @map("account_id") @db.Uuid
+
+  // NULL means "this number has no contact yet" — the create flow. The contact
+  // row does not exist until the code checks out, so there is never a
+  // half-finished contact sitting in the list waiting to be completed.
+  contactId String? @map("contact_id") @db.Uuid
+
+  // The number the code was sent to. Snapshotted rather than read back through
+  // contactId, because for the create flow there is nothing to read it from,
+  // and because the rate limit must count sends to a NUMBER regardless of which
+  // contact (or none) they were for.
+  phone   String
+  channel VerificationChannel
+
+  codeHash String @map("code_hash")
+
+  // The contact-to-be: name, role, notes — everything except the phone, which
+  // is the column above. Set only on the create flow.
+  //
+  // JSON rather than three mirrored columns so it cannot drift as Contact
+  // grows. It is re-validated through the same contactInput() on the way out as
+  // it was on the way in, so nothing unchecked reaches the contacts table.
+  draft Json?
+
+  expiresAt     DateTime  @map("expires_at")
+  // Set when the right code was entered. Also the single-use latch: a consumed
+  // row is refused, so the same code cannot create two contacts.
+  consumedAt    DateTime? @map("consumed_at")
+  // Set when the code was burned rather than used — attempts exhausted, expired
+  // on inspection, or superseded by a newer code for the same number. Separate
+  // from consumedAt so the history says which of the two happened.
+  invalidatedAt DateTime? @map("invalidated_at")
+  checkAttempts Int       @default(0) @map("check_attempts")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  account Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  contact Contact? @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  // The two rate-limit queries, in index form: sends to one number in the last
+  // hour, and sends by one account in the last hour.
+  @@index([accountId, phone, createdAt])
+  @@index([accountId, createdAt])
+  @@index([contactId])
+  @@map("contact_verifications")
 }
 
 model Message {
@@ -223,19 +345,19 @@ model Schedule {
 }
 
 model CallHistory {
-  id        String  @id @default(uuid()) @db.Uuid
-  accountId String  @map("account_id") @db.Uuid
+  id         String  @id @default(uuid()) @db.Uuid
+  accountId  String  @map("account_id") @db.Uuid
   // Null for manual /trigger test calls, which belong to no schedule.
   // SetNull rather than Cascade: deleting a schedule must not erase the
   // evidence that calls were placed.
   scheduleId String? @map("schedule_id") @db.Uuid
   contactId  String? @map("contact_id") @db.Uuid
 
-  kind    CallKind    @default(REMINDER_CALL)
-  dose    String
-  attempt Int         @default(1)
-  repromptCount Int   @default(0) @map("reprompt_count")
-  outcome CallOutcome @default(PENDING)
+  kind          CallKind    @default(REMINDER_CALL)
+  dose          String
+  attempt       Int         @default(1)
+  repromptCount Int         @default(0) @map("reprompt_count")
+  outcome       CallOutcome @default(PENDING)
 
   // The number this attempt was actually dialled at (or texted).
   //

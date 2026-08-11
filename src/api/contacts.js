@@ -4,7 +4,7 @@
 
 const express = require('express');
 const repo    = require('../data/contacts');
-const { asyncHandler, notFound, conflict } = require('./errors');
+const { asyncHandler, notFound, conflict, badRequest, ApiError } = require('./errors');
 const { contactInput } = require('./validate');
 
 const router = express.Router();
@@ -19,12 +19,35 @@ router.get('/:id', asyncHandler(async (req, res) => {
   res.json({ contact });
 }));
 
-router.post('/', asyncHandler(async (req, res) => {
-  const data = contactInput(req.body);
-  res.status(201).json({ contact: await repo.create(req.account.id, data) });
-}));
+// Creating a contact directly is gone.
+//
+// A contact is born from a verification that checked out — POST
+// /api/contacts/verifications, then POST /api/contacts/verifications/:id/check,
+// which returns the created contact. Leaving this route in place as an
+// unverified back door would make the whole feature advisory.
+//
+// A 405 with the route to use, rather than a 404: the endpoint existed until
+// now, and anything still calling it deserves to be told what replaced it rather
+// than left to guess that the API moved.
+router.post('/', (_req, _res, next) => {
+  next(new ApiError(405, 'Contacts are created by verifying a phone number first', {
+    start: 'POST /api/contacts/verifications  { phone, channel: "SMS" | "CALL", name, role?, notes? }',
+    then:  'POST /api/contacts/verifications/:id/check  { code }  → returns the created contact',
+    why:   'a contact\'s number is never taken on trust, so a typo cannot be called',
+  }));
+});
 
 router.patch('/:id', asyncHandler(async (req, res) => {
+  // The phone number is not editable here, and this is the check that keeps
+  // contacts.phone meaning "verified". Letting a PATCH through would put an
+  // unproven number one request away from being dialled — which is the exact
+  // failure this feature exists to prevent, and it would arrive silently.
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'phone')) {
+    throw badRequest('Validation failed', {
+      phone: 'cannot be changed here — start a verification at POST /api/contacts/:id/verifications, and the new number goes live when the code checks out',
+    });
+  }
+
   const data = contactInput(req.body, { partial: true });
   const contact = await repo.update(req.account.id, req.params.id, data);
   // null means zero rows matched — either no such contact, or it belongs to

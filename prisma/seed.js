@@ -144,8 +144,22 @@ async function seedContact(prisma, accountId, { name, phone, role, notes }) {
     return existing;
   }
 
+  // Stamped GRANDFATHERED, like the contacts the verification migration found
+  // already in place.
+  //
+  // The seed's numbers come from GRANDMA_PHONE_NUMBER and
+  // CAREGIVER_PHONE_NUMBER — set by hand, by the person who owns them, in an
+  // environment file. That is not a code, and it is not recorded as one. But
+  // without a stamp these rows would be unverified, and the schedules created
+  // three lines later reference them: the trigger would refuse every one, and
+  // `npm run db:seed` would fail on a fresh database with no way forward except
+  // verifying two numbers before the app can start at all.
   const contact = await prisma.contact.create({
-    data: { accountId, name, phone, role, notes },
+    data: {
+      accountId, name, phone, role, notes,
+      phoneVerifiedAt:  new Date(),
+      phoneVerifiedVia: 'GRANDFATHERED',
+    },
   });
   log.created('contact', `${contact.name} ${contact.phone}`);
   return contact;

@@ -96,6 +96,25 @@ const config = {
   // drift between the two ways an account gets a password.
   minPasswordLength: parseInt(process.env.MIN_PASSWORD_LENGTH || '12', 10),
 
+  // Contact phone verification.
+  //
+  // Every one of these is an env override rather than a constant because they
+  // are the dials you reach for when something is going wrong at 9pm — a code
+  // that keeps expiring before an elderly recipient can read it back, or a
+  // limit that needs tightening because someone found the endpoint. Changing
+  // them from Railway takes effect on the next request; changing a constant
+  // takes a deploy.
+  //
+  // The two send limits do different jobs. Per-number protects the person whose
+  // phone would ring; per-account protects the Twilio bill, and it is the one
+  // that actually bounds the damage — a per-number cap of 5 does nothing about
+  // someone walking through a thousand different numbers.
+  verificationCodeTtlMinutes:    parseInt(process.env.VERIFICATION_CODE_TTL_MINUTES     || '10', 10),
+  verificationMaxChecks:         parseInt(process.env.VERIFICATION_MAX_CHECKS           || '5',  10),
+  verificationMaxSendsPerNumber: parseInt(process.env.VERIFICATION_MAX_SENDS_PER_NUMBER || '5',  10),
+  verificationMaxSendsPerAccount:parseInt(process.env.VERIFICATION_MAX_SENDS_PER_ACCOUNT|| '20', 10),
+  verificationResendCooldownSec: parseInt(process.env.VERIFICATION_RESEND_COOLDOWN_SEC  || '60', 10),
+
   // Retry / flow settings.
   //
   // These are now FALLBACKS, not the source of truth. A call placed from a

@@ -1,5 +1,5 @@
 'use strict';
-const { check, contains, section, summary, assertScratchDatabase, truncateAll } = require('./helpers');
+const { check, contains, section, summary, assertScratchDatabase, truncateAll, makeContact } = require('./helpers');
 require('dotenv').config();
 
 const db            = require('../src/db');
@@ -29,7 +29,7 @@ async function main() {
   await reset();
 
   const account = await prisma.account.create({ data: { email: 'sched-test@example.test' } });
-  const contact = await prisma.contact.create({
+  const contact = await makeContact(prisma, {
     data: { accountId: account.id, name: 'Test Recipient', phone: '+15125550199' },
   });
   const message = await prisma.message.create({

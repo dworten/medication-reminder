@@ -11,6 +11,7 @@ const express = require('express');
 
 const authRouter        = require('./auth');
 const contactsRouter    = require('./contacts');
+const verificationsRouter = require('./contactVerifications');
 const messagesRouter    = require('./messages');
 const schedulesRouter   = require('./schedules');
 const callHistoryRouter = require('./callHistory');
@@ -33,6 +34,12 @@ function apiRouter() {
   router.use('/', authRouter);
 
   // Everything past this point requires a session.
+  //
+  // The verification routes mount on /contacts ahead of the CRUD router, and the
+  // order matters: contactsRouter has GET /:id, which would otherwise match
+  // "verifications" as an id. Express falls through to the second router for
+  // anything the first does not handle, so the split costs nothing.
+  router.use('/contacts',     requireAuth, verificationsRouter);
   router.use('/contacts',     requireAuth, contactsRouter);
   router.use('/messages',     requireAuth, messagesRouter);
   router.use('/schedules',    requireAuth, schedulesRouter);

@@ -36,6 +36,34 @@ const CONSTRAINT_MESSAGES = {
     'daysOfWeek must contain between 1 and 7 unique days, each 0 (Sunday) to 6 (Saturday)',
   schedules_escalation_ack_minutes_check:
     'escalationAckMinutes must be between 1 and 60',
+  contacts_verified_stamp_check:
+    'a verified phone number must record how it was verified',
+  contacts_pending_phone_differs_check:
+    'the new number is the same as the current one',
+};
+
+// The verification triggers raise a bare constraint-style name as their message
+// (see the 20260811000000 migration). They are a separate table from the CHECK
+// constraints above because a trigger is not a check constraint and pretending
+// otherwise in the matching would be a lie told to whoever reads this next.
+//
+// These are the last line, not the first: the API refuses these cases itself
+// with a field error naming the contact. Anything arriving here came in past the
+// API — Prisma Studio, psql, a future bug — and the point is that it still gets
+// refused, with wording rather than a raw plpgsql exception.
+const TRIGGER_MESSAGES = {
+  schedules_contact_must_be_verified: [
+    'contactId',
+    'that contact\'s phone number has not been verified yet — verify it before a schedule can call it',
+  ],
+  schedules_escalation_contact_must_be_verified: [
+    'escalationContactId',
+    'that contact\'s phone number has not been verified yet — verify it before it can receive alerts',
+  ],
+  contacts_cannot_unverify_while_scheduled: [
+    'phoneVerifiedAt',
+    'this contact is still used by a schedule, so its number cannot be marked unverified — repoint or delete those schedules first',
+  ],
 };
 
 function fromPrisma(err) {
@@ -75,11 +103,19 @@ function fromPrisma(err) {
   // Prisma could not find the row it was told to act on.
   if (err.code === 'P2025') return notFound();
 
+  const message = String(err.message || '');
+
+  // A RAISE EXCEPTION from one of the verification triggers. Same handle as the
+  // CHECK constraints below — the message text — because plpgsql exceptions
+  // reach Prisma with no code of their own either.
+  for (const [name, [field, wording]] of Object.entries(TRIGGER_MESSAGES)) {
+    if (message.includes(name)) return conflict(wording, { field });
+  }
+
   // CHECK constraints have no Prisma error code — they arrive as a raw Postgres
   // error, wrapped differently depending on the driver adapter. Matching the
   // text is unlovely but it is the only handle on them, and letting a CHECK
   // become a 500 is exactly the outcome this file exists to prevent.
-  const message = String(err.message || '');
   const check   = message.match(/violates check constraint "([^"]+)"/)
                || message.match(/check constraint `([^`]+)`/);
 
