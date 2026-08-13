@@ -37,7 +37,6 @@ function form(message) {
 
   return `<form id="message-form" class="panel" novalidate>
     <h2 class="panel-title">${message ? 'Edit message' : 'New message'}</h2>
-    <p class="sub" style="margin-bottom:1.5rem">Wording any schedule can point at.</p>
 
     <div class="form-grid">
       <div class="field"><label for="m-name">Name <span class="hint">— for your reference, never spoken</span></label>
@@ -90,7 +89,7 @@ export async function renderMessages() {
     <div class="page-head">
       <div>
         <h1>Messages</h1>
-        <p class="sub">What the call says. A schedule with no message uses the built-in wording.</p>
+        <p class="sub">These are the messages that you can choose from to send to the primary recipient either by voice call or text message.</p>
       </div>
       <div class="button-row"><button class="primary" data-act="new">New message</button></div>
     </div>
@@ -99,7 +98,7 @@ export async function renderMessages() {
     <article class="card message is-builtin">
       <div class="card-head">
         <div>
-          <h2 class="card-title">Built-in default</h2>
+          <h2 class="card-title">Default</h2>
           <p class="tag-row">${badge('Always available', 'off')}</p>
         </div>
       </div>

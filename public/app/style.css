@@ -342,9 +342,10 @@ h2 {
 .schedule-foot dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
 .schedule .card-actions { padding: 0 1rem 1rem; }
 
-/* Disabled schedules. Not opacity — that drags text under the contrast floor.
-   The card loses its blue, gains a dashed edge and a struck-through time, and
-   says "Paused" in words. Three signals, none of them colour alone. */
+/* Inactive event schedules. Not opacity — that drags text under the contrast
+   floor. The card loses its blue, gains a dashed edge and a struck-through
+   time, and says "Inactive" in words on a red pill. Three signals, none of them
+   colour alone. */
 /* The dashed border and muted ground come from the shared .card.is-off rule. */
 .schedule.is-off .schedule-head { background: var(--off-soft); }
 .schedule.is-off .schedule-time { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 2px; }
@@ -427,6 +428,25 @@ input:hover, select:hover, textarea:hover { border-color: var(--accent); }
 }
 .checkline input { width: 1.125rem; height: 1.125rem; margin: 0; accent-color: var(--accent); flex: none; }
 .checkline label { margin: 0; font-weight: 500; font-size: var(--text-sm); }
+
+/* Advanced: a real <details>, so the open/closed state, the keyboard handling
+   and the screen-reader announcement come from the element rather than from
+   script. The summary is given the h2 section-label treatment because that is
+   what it is — a section divider that happens to fold.
+
+   The marker is left to the browser rather than replaced with a rotating
+   pseudo-element: the native triangle already changes shape when open, and a
+   fold whose only "open" signal is a CSS transform is one more thing that can
+   disagree with the element's real state. */
+.advanced { margin-top: 2rem; border-top: 1px solid var(--line); }
+.advanced summary {
+  font-size: var(--text-sm); margin: .75rem 0; cursor: pointer;
+  text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  font-weight: 600;
+}
+/* The grid inside would otherwise inherit the whole-panel bottom margin and
+   leave a gap that makes the fold look empty when it is not. */
+.advanced .form-grid { margin-bottom: .5rem; }
 
 /* Day-of-week picker: seven toggles. */
 .days { display: flex; gap: .375rem; margin-bottom: 1rem; flex-wrap: wrap; }

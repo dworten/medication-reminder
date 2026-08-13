@@ -13,7 +13,12 @@ import {
 import { refresh } from '../app.js';
 import { channelField, mountCodeStep } from './verify.js';
 
-const ROLE_LABEL = { RECIPIENT: 'Recipient', CAREGIVER: 'Caregiver', BOTH: 'Both' };
+// Display only. The stored values (RECIPIENT / CAREGIVER / BOTH) are untouched
+// — they travel to the API, the schema and the alert path, so renaming them
+// here is a label change and nothing more.
+const ROLE_LABEL = { RECIPIENT: 'Primary Recipient', CAREGIVER: 'Primary Backup', BOTH: 'Both' };
+
+const ROLE_HINT = "— Is the person a Primary Recipient, Backup Recipient, or Both?";
 
 const WARN_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Zm.9 7.6 2.4 1.4a.9.9 0 1 1-.9 1.6L7.6 9a.9.9 0 0 1-.5-.8V4a.9.9 0 1 1 1.8 0v3.6Z"/></svg>';
 
@@ -34,7 +39,7 @@ function verificationWarning(contact) {
 }
 
 function card(contact) {
-  return `<article class="card contact ${contact.isActive ? '' : 'is-off'}" data-id="${esc(contact.id)}">
+  return `<article class="card contact" data-id="${esc(contact.id)}">
     <div class="card-head">
       <div>
         <h2 class="card-title">${esc(contact.name)}</h2>
@@ -45,7 +50,6 @@ function card(contact) {
     <p class="tag-row">
       ${verificationWarning(contact)}
       ${badge(ROLE_LABEL[contact.role] || contact.role, 'info')}
-      ${contact.isActive ? '' : badge('Inactive', 'off')}
     </p>
     ${contact.pendingPhone ? pendingNotice(contact) : ''}
     ${contact.notes ? `<p class="small muted contact-notes">${esc(contact.notes)}</p>` : ''}
@@ -93,12 +97,12 @@ function newContactForm(draft = {}) {
         <input id="c-name" name="name" type="text" value="${esc(d.name)}" required></div>
 
       <div class="field">
-        <label for="c-phone">Phone <span class="hint">— E.164: a plus, country code, then the number</span></label>
+        <label for="c-phone">Telephone Number <span class="hint">— Include '+', country code, and telephone number</span></label>
         <input id="c-phone" name="phone" type="text" value="${esc(d.phone)}"
                placeholder="+15125550123" inputmode="tel" required>
       </div>
 
-      <div class="field span-2"><label for="c-role">Role <span class="hint">— a label for grouping; the schedule decides who is actually called</span></label>
+      <div class="field span-2"><label for="c-role">Role <span class="hint">${esc(ROLE_HINT)}</span></label>
         <select id="c-role" name="role">
           ${Object.entries(ROLE_LABEL).map(([value, label]) =>
             `<option value="${value}" ${d.role === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
@@ -119,6 +123,19 @@ function newContactForm(draft = {}) {
 
 // Editing: everything except the number.
 //
+// There is deliberately no "Active" checkbox here any more. The is_active
+// column still exists and the API still accepts it, but nothing reads it:
+// data/contacts.js list() filters on accountId alone, and neither the
+// scheduler, callManager nor smsAlert mentions it. So the control greyed out a
+// card while the contact carried on being called and texted exactly as before —
+// an interface saying the opposite of what the call path does, on the one
+// screen where that matters most.
+//
+// The field is simply absent from the payload, which the validator treats as
+// "leave it alone" (see Check.field), so every stored value survives untouched.
+// If deactivation should genuinely stop calls, that is a change to the call
+// path — not a checkbox — and the control comes back with it.
+//
 // The phone is shown read-only behind its own button rather than being a
 // disabled input nobody can explain. Changing it is a different operation with a
 // different outcome — it starts a verification, it does not save a field — and
@@ -132,7 +149,7 @@ function editContactForm(contact) {
         <input id="c-name" name="name" type="text" value="${esc(contact.name)}" required></div>
 
       <div class="field">
-        <label for="c-phone-display">Phone</label>
+        <label for="c-phone-display">Telephone Number</label>
         <div class="locked-field">
           <span id="c-phone-display" class="locked-value">${esc(contact.phone)}</span>
           ${verificationWarning(contact)}
@@ -147,7 +164,7 @@ function editContactForm(contact) {
         </div>
       </div>
 
-      <div class="field span-2"><label for="c-role">Role <span class="hint">— a label for grouping; the schedule decides who is actually called</span></label>
+      <div class="field span-2"><label for="c-role">Role <span class="hint">${esc(ROLE_HINT)}</span></label>
         <select id="c-role" name="role">
           ${Object.entries(ROLE_LABEL).map(([value, label]) =>
             `<option value="${value}" ${contact.role === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
@@ -155,11 +172,6 @@ function editContactForm(contact) {
 
       <div class="field span-2"><label for="c-notes">Notes <span class="hint">— optional</span></label>
         <textarea id="c-notes" name="notes">${esc(contact.notes || '')}</textarea></div>
-    </div>
-
-    <div class="checkline">
-      <input id="c-active" name="isActive" type="checkbox" ${contact.isActive ? 'checked' : ''}>
-      <label for="c-active">Active</label>
     </div>
 
     <div class="button-row">
@@ -206,7 +218,6 @@ export async function renderContacts() {
     <div class="page-head">
       <div>
         <h1>Contacts</h1>
-        <p class="sub">Who can be called — the person being reminded, and whoever gets alerted.</p>
       </div>
       <div class="button-row"><button class="primary" data-act="new">New contact</button></div>
     </div>

@@ -73,11 +73,28 @@ export function prettyTime(hhmm) {
 
 // The short zone name — "CDT" — so a bare "9:20 AM" is never ambiguous about
 // which clock it refers to.
+// Rendered as an offset ("-5 GMT") rather than an abbreviation ("CDT").
+//
+// The offset is computed at render time from the zone, not stored, so a
+// America/Chicago card reads "-5 GMT" through the summer and "-6 GMT" from
+// November without anything being edited. That is the reason not to keep a
+// literal string here: the number is only correct for half the year.
+//
+// Intl hands back "GMT-5", so the sign is moved to the front. The zero offset
+// arrives as a bare "GMT" with no number at all, which would read as a
+// different kind of value sitting beside cards that all carry a sign — so UTC
+// is spelled "+0 GMT" rather than left alone.
 export function zoneAbbrev(timeZone, at = new Date()) {
   try {
-    const parts = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'short' }).formatToParts(at);
-    return parts.find((p) => p.type === 'timeZoneName')?.value || timeZone;
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'shortOffset' }).formatToParts(at);
+    const name = parts.find((p) => p.type === 'timeZoneName')?.value;
+    if (!name) return timeZone;
+    const offset = name === 'GMT' ? '+0' : name.replace('GMT', '');
+    return `${offset} GMT`;
   } catch {
+    // Also the landing spot for engines without 'shortOffset', which throw a
+    // RangeError rather than degrading. The zone name is worse than an offset
+    // but is never wrong.
     return timeZone;
   }
 }
