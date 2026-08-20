@@ -7,22 +7,42 @@ import {
 } from '../ui.js';
 import { refresh } from '../app.js';
 
-// What the call actually says when a schedule has no message attached. Shown so
-// the built-in wording is visible rather than folklore.
+// Placeholder wording for an empty new message, and the sentence the app always
+// appends on a call. Neither is a message row; both are here only to be shown.
 const BUILT_IN = 'Hi, this is your medicine reminder.';
 const QUESTION = 'Have you taken your medicine? Say Yes or No, or type 1 for yes and 2 for no.';
 
+// Display names for the stored kinds. The stored values (TTS / AUDIO / TEXT)
+// are untouched — they travel to the API, the schema and the call path, so
+// renaming them here is a label change and nothing more.
+const KIND_LABEL = {
+  TTS:   'Voice Typed Message',
+  AUDIO: 'Voice Recorded Message',
+  TEXT:  'Text Message',
+};
+
+// "Make default" appears only on typed voice messages: the default exists to be
+// what an event schedule speaks when it has no message of its own, and the
+// schedule picker offers typed messages alone — a recording or a text marked
+// default would be a default nothing can use. There is deliberately no
+// "unset": the default moves by making another message the default, so an
+// account with one can never quietly end up with none.
 function card(message) {
+  const canBeDefault = message.kind === 'TTS' && !message.isDefault;
+
   return `<article class="card message" data-id="${esc(message.id)}">
     <div class="card-head">
       <div>
         <h3 class="card-title">${esc(message.name)}</h3>
         <p class="tag-row">
-          ${badge(message.kind === 'AUDIO' ? 'Audio file' : 'Spoken text', 'info')}
           ${message.isDefault ? badge('Default', 'ok') : ''}
+          ${badge(KIND_LABEL[message.kind] || message.kind, 'info')}
         </p>
       </div>
-      <div class="card-actions"><button class="small" data-act="edit">Edit</button></div>
+      <div class="card-actions">
+        ${canBeDefault ? '<button class="small" data-act="make-default">Make default</button>' : ''}
+        <button class="small" data-act="edit">Edit</button>
+      </div>
     </div>
     <p class="message-body">
       ${message.kind === 'AUDIO'
@@ -32,46 +52,72 @@ function card(message) {
   </article>`;
 }
 
-function form(message) {
-  const m = message || { name: '', kind: 'TTS', ttsText: '', audioUrl: '', voice: '', language: '', isDefault: false };
+// The three ways a new message can start. Editing skips this — an existing row
+// already knows its kind — and the form never asks again: the kind rides along
+// in a hidden input rather than a Type dropdown.
+function chooser() {
+  return `<div id="kind-chooser" class="panel">
+    <h2 class="panel-title">New Message</h2>
+    <div class="kind-choice">
+      <button type="button" data-kind="TTS">
+        <span class="choice-title">Voice Typed Message</span>
+        <span class="small muted">Written here, spoken aloud by the call.</span>
+      </button>
+      <button type="button" data-kind="AUDIO">
+        <span class="choice-title">Voice Recorded Message</span>
+        <span class="small muted">An audio recording, played on the call.</span>
+      </button>
+      <button type="button" data-kind="TEXT">
+        <span class="choice-title">Text Message</span>
+        <span class="small muted">Sent as an SMS, never spoken.</span>
+      </button>
+    </div>
+    <div class="button-row"><button type="button" data-act="cancel">Cancel</button></div>
+  </div>`;
+}
+
+// One form for all three kinds. The kind is fixed before the form opens, so
+// there is no Type control; the section a kind cannot use is grayed out rather
+// than removed — its inputs are disabled, which keeps them out of the submitted
+// payload (readForm skips disabled elements, and on a partial update an absent
+// field means "leave it alone"), while the form keeps one recognisable shape
+// across all three kinds.
+//
+// The "always asked" note is left off the Text form: the question belongs to
+// the voice call's Gather, and a text message has no Gather to feed.
+function form(message, kind) {
+  const m = message || { name: '', ttsText: '', audioUrl: '', voice: '', language: '' };
+
+  const isTyped    = kind === 'TTS';
+  const isRecorded = kind === 'AUDIO';
+  const isText     = kind === 'TEXT';
+
+  const off = (relevant) => (relevant ? '' : 'disabled');
+  const dim = (relevant) => (relevant ? '' : ' grayed');
 
   return `<form id="message-form" class="panel" novalidate>
-    <h2 class="panel-title">${message ? 'Edit message' : 'New message'}</h2>
+    <h2 class="panel-title">${message ? 'Edit' : 'New'} ${esc(KIND_LABEL[kind])}</h2>
+    <input type="hidden" name="kind" value="${esc(kind)}">
 
     <div class="form-grid">
-      <div class="field"><label for="m-name">Name <span class="hint">— for your reference, never spoken</span></label>
+      <div class="field span-2"><label for="m-name">Name <span class="hint">— for your reference, never spoken or sent</span></label>
         <input id="m-name" name="name" type="text" value="${esc(m.name)}" required></div>
-
-      <div class="field"><label for="m-kind">Type</label>
-        <select id="m-kind" name="kind">
-          <option value="TTS"   ${m.kind === 'TTS'   ? 'selected' : ''}>Spoken text</option>
-          <option value="AUDIO" ${m.kind === 'AUDIO' ? 'selected' : ''}>Audio file</option>
-        </select></div>
     </div>
 
-    <div id="tts-fields" class="${m.kind === 'AUDIO' ? 'hidden' : ''}">
-      <div class="field"><label for="m-text">What to say</label>
-        <textarea id="m-text" name="ttsText" placeholder="${esc(BUILT_IN)}">${esc(m.ttsText || '')}</textarea></div>
-      <div class="field"><label for="m-voice">Voice <span class="hint">— optional Twilio voice name; blank uses the default</span></label>
-        <input id="m-voice" name="voice" type="text" value="${esc(m.voice || '')}" placeholder="Polly.Joanna"></div>
-      <div class="field"><label for="m-lang">Language <span class="hint">— optional, e.g. en-US</span></label>
-        <input id="m-lang" name="language" type="text" value="${esc(m.language || '')}" placeholder="en-US"></div>
-    </div>
+    <div class="field${dim(isRecorded)}"><label for="m-url">Audio file URL <span class="hint">— must be https; Twilio fetches it during the call</span></label>
+      <input id="m-url" name="audioUrl" type="url" value="${esc(m.audioUrl || '')}" placeholder="https://example.com/reminder.mp3" ${off(isRecorded)}></div>
 
-    <div id="audio-fields" class="${m.kind === 'AUDIO' ? '' : 'hidden'}">
-      <div class="field"><label for="m-url">Audio file URL <span class="hint">— must be https; Twilio fetches it during the call</span></label>
-        <input id="m-url" name="audioUrl" type="url" value="${esc(m.audioUrl || '')}" placeholder="https://example.com/reminder.mp3"></div>
-    </div>
+    <div class="field${dim(!isRecorded)}"><label for="m-text">${isText ? 'Message text' : 'What to say'}</label>
+      <textarea id="m-text" name="ttsText" placeholder="${esc(BUILT_IN)}" ${off(!isRecorded)}>${esc(m.ttsText || '')}</textarea></div>
+    <div class="field${dim(isTyped)}"><label for="m-voice">Voice <span class="hint">— optional Twilio voice name; blank uses the default</span></label>
+      <input id="m-voice" name="voice" type="text" value="${esc(m.voice || '')}" placeholder="Polly.Joanna" ${off(isTyped)}></div>
+    <div class="field${dim(isTyped)}"><label for="m-lang">Language <span class="hint">— optional, e.g. en-US</span></label>
+      <input id="m-lang" name="language" type="text" value="${esc(m.language || '')}" placeholder="en-US" ${off(isTyped)}></div>
 
-    <div class="checkline">
-      <input id="m-default" name="isDefault" type="checkbox" ${m.isDefault ? 'checked' : ''}>
-      <label for="m-default">Use as the default message</label>
-    </div>
-
-    <p class="small muted">
+    ${isText ? '' : `<p class="small muted">
       The question is always asked by the app after your message, so a Gather still makes sense
-      whatever you write here: “${esc(QUESTION)}”
-    </p>
+      whatever it says: “${esc(QUESTION)}”
+    </p>`}
 
     <div class="button-row">
       <button type="submit" class="primary">${message ? 'Save changes' : 'Create message'}</button>
@@ -95,32 +141,20 @@ export async function renderMessages() {
     </div>
 
     <div id="library">
-    <article class="card message is-builtin">
-      <div class="card-head">
-        <div>
-          <h2 class="card-title">Default</h2>
-          <p class="tag-row">${badge('Always available', 'off')}</p>
-        </div>
-      </div>
-      <p class="message-body">“${esc(BUILT_IN)}”</p>
-    </article>
-
-    <h2>Your messages</h2>
+    ${messages.length && !messages.some((m) => m.isDefault)
+      ? `<div class="banner banner-warn"><span><strong>No message is marked as the default.</strong>
+          An event schedule with no message of its own will speak the built-in wording
+          — “${esc(BUILT_IN)}” — which cannot be edited here.</span></div>`
+      : ''}
     <div id="list" class="card-grid">
-      ${messages.length ? messages.map(card).join('') : '<p class="empty">No custom messages yet.</p>'}
+      ${messages.length ? messages.map(card).join('') : '<p class="empty">No messages yet.</p>'}
     </div>
     </div>
     <div id="editor"></div>
   `);
 
-  // Only one of the two field groups applies at a time; showing both invites a
-  // TTS message with an audio URL that will never play.
-  const style = document.createElement('style');
-  style.textContent = '.hidden { display: none; }';
-  el.appendChild(style);
-
-  // The whole library hides while the editor is open — the built-in card and
-  // the heading included, or the form appears to belong to them.
+  // The whole library hides while the editor is open, or the form appears to
+  // belong to whichever card it happens to sit under.
   const library = el.querySelector('#library');
   const editor  = el.querySelector('#editor');
   const newBtn  = el.querySelector('[data-act="new"]');
@@ -131,28 +165,32 @@ export async function renderMessages() {
     newBtn.style.display = '';
   }
 
-  function openEditor(message) {
+  function openPanel(html) {
     library.style.display = 'none';
     newBtn.style.display = 'none';
-    editor.innerHTML = form(message);
+    editor.innerHTML = html;
+    return editor.firstElementChild;
+  }
 
-    const formEl = editor.querySelector('#message-form');
-    const kind   = formEl.querySelector('#m-kind');
+  function openChooser() {
+    const panel = openPanel(chooser());
+    panel.querySelector('[data-act="cancel"]').addEventListener('click', closeEditor);
+    for (const button of panel.querySelectorAll('[data-kind]')) {
+      button.addEventListener('click', () => openEditor(null, button.dataset.kind));
+    }
+  }
 
-    const syncKind = () => {
-      formEl.querySelector('#tts-fields').classList.toggle('hidden', kind.value === 'AUDIO');
-      formEl.querySelector('#audio-fields').classList.toggle('hidden', kind.value !== 'AUDIO');
-    };
-    kind.addEventListener('change', syncKind);
+  function openEditor(message, kind = message?.kind || 'TTS') {
+    const formEl = openPanel(form(message, kind));
 
     formEl.querySelector('[data-act="cancel"]').addEventListener('click', closeEditor);
 
     formEl.querySelector('[data-act="delete"]')?.addEventListener('click', async () => {
-      if (!confirmAction(`Delete "${message.name}"? Schedules using it fall back to the built-in wording.`)) return;
+      if (!confirmAction(`Delete "${message.name}"? Event schedules using it fall back to the built-in wording.`)) return;
       try {
         const result = await api.messages.remove(message.id);
         toast(result?.schedulesReset?.length
-          ? `Deleted — ${result.schedulesReset.length} schedule(s) reverted to the default wording`
+          ? `Deleted — ${result.schedulesReset.length} event schedule(s) reverted to the default wording`
           : 'Message deleted');
         await refresh();
       } catch (err) { toast(err.message, 'bad'); }
@@ -179,11 +217,23 @@ export async function renderMessages() {
     });
   }
 
-  newBtn.addEventListener('click', () => openEditor(null));
+  newBtn.addEventListener('click', openChooser);
 
   for (const article of el.querySelectorAll('.card[data-id]')) {
     const message = messages.find((m) => m.id === article.dataset.id);
     article.querySelector('[data-act="edit"]').addEventListener('click', () => openEditor(message));
+
+    article.querySelector('[data-act="make-default"]')?.addEventListener('click', async (event) => {
+      event.target.disabled = true;
+      try {
+        await api.messages.update(message.id, { isDefault: true });
+        toast(`"${message.name}" is now the default message`);
+        await refresh();
+      } catch (err) {
+        toast(err.message, 'bad');
+        event.target.disabled = false;
+      }
+    });
   }
 
   return el;

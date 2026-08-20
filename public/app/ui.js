@@ -182,8 +182,8 @@ export function outcomeBadge(outcome) {
 
 const KINDS = {
   REMINDER_CALL:   'Call',
-  ESCALATION_CALL: 'Caregiver call',
-  ESCALATION_SMS:  'Caregiver text',
+  ESCALATION_CALL: 'Backup Contact call',
+  ESCALATION_SMS:  'Backup Contact text',
 };
 export const kindLabel = (kind) => KINDS[kind] || kind;
 

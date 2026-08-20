@@ -41,11 +41,13 @@ enum ContactRole {
   @@map("contact_role")
 }
 
-// TTS   → Twilio <Say> with ttsText
-// AUDIO → Twilio <Play> with audioUrl
+// TTS   → Twilio <Say> with ttsText   (shown as "Voice Typed Message")
+// AUDIO → Twilio <Play> with audioUrl (shown as "Voice Recorded Message")
+// TEXT  → an SMS body, stored in ttsText; never spoken on a call
 enum MessageKind {
   TTS
   AUDIO
+  TEXT
 
   @@map("message_kind")
 }

@@ -12,11 +12,11 @@ import {
   formatWhen, relative,
 } from '../ui.js';
 import { refresh } from '../app.js';
+import { TZ_CITIES, cityLabel, zoneCity, zoneFromLabel } from '../timezones.js';
 
-const COMMON_ZONES = [
-  'America/Chicago', 'America/New_York', 'America/Denver', 'America/Los_Angeles',
-  'America/Phoenix', 'America/Anchorage', 'Pacific/Honolulu', 'UTC',
-];
+// Where a brand-new schedule starts. Every existing schedule carries its own
+// zone; this only decides the first one.
+const DEFAULT_ZONE = 'America/Chicago';
 
 // `dose` is derived from the time rather than chosen. It was a redundant
 // question — a 9:20 AM schedule is obviously the morning one — but the column
@@ -111,7 +111,7 @@ function dayPicker(selected) {
 function form(schedule, contacts, messages) {
   const s = schedule || {
     name: '', dose: 'morning', timeOfDay: '09:20', daysOfWeek: [1, 2, 3, 4, 5, 6],
-    timezone: COMMON_ZONES[0], maxAttempts: 2, retryDelayMinutes: 3, maxReprompts: 3,
+    timezone: DEFAULT_ZONE, maxAttempts: 2, retryDelayMinutes: 3, maxReprompts: 3,
     escalateWithCall: true, escalateWithSms: true, escalationAckMinutes: 3,
     contactId: contacts[0]?.id || '', messageId: '', escalationContactId: '',
   };
@@ -122,7 +122,26 @@ function form(schedule, contacts, messages) {
       ${esc(item.name)}${item.phone ? ` — ${esc(item.phone)}` : ''}
     </option>`).join('');
 
-  const zones = [...new Set([s.timezone, ...COMMON_ZONES])];
+  // Voice Typed Messages only. Recordings are excluded by design (Phase 2), and
+  // a Text Message is for sending, not speaking. Nothing filtered out can be
+  // invisible: every message's card on the Messages screen carries its kind as
+  // a tag, so a row that this picker declines to offer still says what it is
+  // and why it lives elsewhere.
+  const speakable = messages.filter((m) => m.kind === 'TTS');
+
+  // The account's default row, not an empty value. Leaving messageId blank
+  // would send the call path to its own hardcoded wording, and editing the
+  // Default message would then quietly not apply to this schedule.
+  const fallback = speakable.find((m) => m.isDefault);
+  const chosenMessage = s.messageId || fallback?.id || '';
+
+  const messageOptions = (list, selected) =>
+    // Only when there is no default row to fall back on — otherwise every
+    // schedule points at a real, editable message.
+    (list.some((m) => m.isDefault) ? '' : '<option value="">Default wording</option>') +
+    list.map((item) => `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>
+      ${esc(item.name)}${item.isDefault ? ' (Default)' : ''}
+    </option>`).join('');
 
   return `<form id="schedule-form" class="panel" novalidate>
     <h2 class="panel-title">${schedule ? 'Edit Event Schedule' : 'New Event Schedule'}</h2>
@@ -137,16 +156,19 @@ function form(schedule, contacts, messages) {
 
       <div class="field span-2"><label>Days</label>${dayPicker(s.daysOfWeek)}</div>
 
-      <div class="field"><label for="f-zone">Timezone</label>
-        <select id="f-zone" name="timezone">
-          ${zones.map((z) => `<option value="${esc(z)}" ${z === s.timezone ? 'selected' : ''}>${esc(z)}</option>`).join('')}
-        </select></div>
+      <div class="field"><label for="f-zone-city">Timezone <span class="hint">— type a city</span></label>
+        <input id="f-zone-city" name="timezoneCity" type="text" list="tz-cities"
+               value="${esc(zoneCity(s.timezone))}" placeholder="Dallas" autocomplete="off" required>
+        <input id="f-zone" name="timezone" type="hidden" value="${esc(s.timezone)}">
+        <datalist id="tz-cities">
+          ${TZ_CITIES.map((entry) => `<option value="${esc(cityLabel(entry))}"></option>`).join('')}
+        </datalist></div>
 
       <div class="field"><label for="f-time">Time <span class="hint">— 24-hour, in the timezone beside it</span></label>
         <input id="f-time" name="timeOfDay" type="time" value="${esc(s.timeOfDay)}" required></div>
 
       <div class="field span-2"><label for="f-message">Initial Message to Primary Recipient</label>
-        <select id="f-message" name="messageId">${options(messages, s.messageId, 'Default')}</select></div>
+        <select id="f-message" name="messageId">${messageOptions(speakable, chosenMessage)}</select></div>
     </div>
 
     <h2>If Primary Recipient doesn't answer</h2>
@@ -182,7 +204,7 @@ function form(schedule, contacts, messages) {
     </details>
 
     <div class="button-row">
-      <button type="submit" class="primary">${schedule ? 'Save changes' : 'Create schedule'}</button>
+      <button type="submit" class="primary">${schedule ? 'Save changes' : 'Create event schedule'}</button>
       <button type="button" data-act="cancel">Cancel</button>
       <span class="spacer"></span>
       ${schedule ? '<button type="button" class="danger" data-act="delete">Delete</button>' : ''}
@@ -241,11 +263,24 @@ export async function renderSchedules(context) {
     const formEl = editor.querySelector('#schedule-form');
     formEl.querySelector('[data-act="cancel"]').addEventListener('click', closeEditor);
 
+    // The box shows a city; the hidden field carries the IANA zone that is
+    // actually stored. Kept in step as it is typed rather than only on submit,
+    // so picking a suggestion and pressing Enter cannot save a stale zone.
+    const zoneCityInput = formEl.querySelector('#f-zone-city');
+    const zoneInput     = formEl.querySelector('#f-zone');
+    const syncZone = () => {
+      const zone = zoneFromLabel(zoneCityInput.value);
+      if (zone) zoneInput.value = zone;
+      return zone;
+    };
+    zoneCityInput.addEventListener('input', syncZone);
+    zoneCityInput.addEventListener('change', syncZone);
+
     formEl.querySelector('[data-act="delete"]')?.addEventListener('click', async () => {
       if (!confirmAction(`Delete "${schedule.name}"? Calls already placed stay in the history.`)) return;
       try {
         await api.schedules.remove(schedule.id);
-        toast('Schedule deleted');
+        toast('Event schedule deleted');
         await refresh();
       } catch (err) { toast(err.message, 'bad'); }
     });
@@ -258,6 +293,19 @@ export async function renderSchedules(context) {
         numbers:  ['maxAttempts', 'retryDelayMinutes', 'maxReprompts'],
         nullable: ['messageId', 'escalationContactId'],
       });
+
+      // Refuse rather than guess. A city that resolves to nothing would
+      // otherwise fall through to whatever zone was last in the hidden field,
+      // which is how a schedule silently starts calling an hour out.
+      const zone = syncZone();
+      if (!zone) {
+        showFieldErrors(formEl, { timezoneCity: 'Pick a city from the list' });
+        toast('Check the highlighted fields', 'bad');
+        return;
+      }
+      data.timezone = zone;
+      delete data.timezoneCity;  // the label; only the zone is stored
+
       // The day toggles are checkboxes outside the name-based read, so they are
       // gathered separately into the array the API expects.
       data.daysOfWeek = [...formEl.querySelectorAll('[data-group="days"]:checked')].map((i) => Number(i.value));
@@ -271,13 +319,21 @@ export async function renderSchedules(context) {
       try {
         if (schedule) await api.schedules.update(schedule.id, data);
         else          await api.schedules.create(data);
-        toast(schedule ? 'Schedule saved' : 'Schedule created');
+        toast(schedule ? 'Event schedule saved' : 'Event schedule created');
         await refresh();
       } catch (err) {
         submit.disabled = false;
+        // The API rejects the field it was sent — `timezone` — but that input is
+        // hidden, so its message would attach to something nobody can see or
+        // focus. Move it onto the city box the reader is actually looking at.
+        const details = { ...err.details };
+        if (details.timezone) {
+          details.timezoneCity = details.timezone;
+          delete details.timezone;
+        }
         // Field-level errors land on their inputs; anything else gets a toast,
         // so a validation failure is never silent.
-        if (!showFieldErrors(formEl, err.details)) toast(err.message, 'bad');
+        if (!showFieldErrors(formEl, details)) toast(err.message, 'bad');
         else toast('Check the highlighted fields', 'bad');
       }
     });
@@ -304,7 +360,7 @@ export async function renderSchedules(context) {
       event.target.disabled = true;
       try {
         await api.schedules.setEnabled(schedule.id, !schedule.enabled);
-        toast(turningOff ? 'Schedule disabled' : 'Schedule enabled');
+        toast(turningOff ? 'Event schedule disabled' : 'Event schedule enabled');
         await refresh();
       } catch (err) {
         toast(err.message, 'bad');

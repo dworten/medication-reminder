@@ -20,7 +20,9 @@ const E164 = /^\+[1-9]\d{7,14}$/;
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 const CONTACT_ROLES = new Set(['RECIPIENT', 'CAREGIVER', 'BOTH']);
-const MESSAGE_KINDS = new Set(['TTS', 'AUDIO']);
+// TTS is spoken, AUDIO is played, TEXT is sent as an SMS. A TEXT message keeps
+// its body in ttsText — same column, different delivery.
+const MESSAGE_KINDS = new Set(['TTS', 'AUDIO', 'TEXT']);
 // SMS or a spoken call. CALL is not a nicety — the person being reminded may not
 // read a text at all, so a number that can only be verified by SMS is a number
 // that cannot be verified.
@@ -236,10 +238,11 @@ function verificationCheckInput(body) {
   return { code };
 }
 
-// A message must be usable by the call path: TTS with nothing to say, or AUDIO
-// with nothing to play, is a row that silently falls back to the built-in
-// prompt. Rejecting it here is the difference between a caught mistake and a
-// custom message that never plays.
+// A message must be usable by its delivery path: TTS with nothing to say,
+// AUDIO with nothing to play, or TEXT with nothing to send is a row that
+// silently falls back to the built-in prompt or sends nothing at all.
+// Rejecting it here is the difference between a caught mistake and a custom
+// message that never plays.
 function messageInput(body, opts = {}) {
   const data = new Check(body, opts)
     .field('name',     { required: true }, str(120))
@@ -256,6 +259,7 @@ function messageInput(body, opts = {}) {
   const audio = data.audioUrl !== undefined ? data.audioUrl : opts.existing && opts.existing.audioUrl;
 
   if (kind === 'TTS'   && !tts)   throw badRequest('Validation failed', { ttsText:  'is required when kind is TTS' });
+  if (kind === 'TEXT'  && !tts)   throw badRequest('Validation failed', { ttsText:  'is required when kind is TEXT' });
   if (kind === 'AUDIO' && !audio) throw badRequest('Validation failed', { audioUrl: 'is required when kind is AUDIO' });
 
   return data;

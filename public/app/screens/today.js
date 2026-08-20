@@ -39,7 +39,7 @@ function nextUp(schedules, timeZone) {
     const anyDisabled = schedules.some((s) => !s.enabled);
     return `<div class="banner banner-warn">
       No calls are scheduled.
-      ${anyDisabled ? 'Every schedule is currently disabled — nobody will be called.' : 'Add a schedule to get started.'}
+      ${anyDisabled ? 'Every event schedule is currently disabled — nobody will be called.' : 'Add an event schedule to get started.'}
     </div>`;
   }
 
@@ -49,7 +49,7 @@ function nextUp(schedules, timeZone) {
     <p class="stat-value">${esc(prettyTime(next.timeOfDay))} <span class="stat-unit">${esc(zoneAbbrev(next.timezone))}</span></p>
     <p class="stat-label">${esc(formatWhen(next.nextRunAt, timeZone))} · <strong>${esc(relative(next.nextRunAt))}</strong></p>
     <dl class="rows">
-      <div class="row"><dt>Schedule</dt><dd>${esc(next.name)} · ${esc(describeDays(next.daysOfWeek))}</dd></div>
+      <div class="row"><dt>Event Schedule</dt><dd>${esc(next.name)} · ${esc(describeDays(next.daysOfWeek))}</dd></div>
       <div class="row"><dt>Calls</dt><dd>${esc(next.contact?.name || 'no contact')}</dd></div>
     </dl>
   </article>`;

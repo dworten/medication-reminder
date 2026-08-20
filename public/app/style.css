@@ -512,8 +512,18 @@ button[disabled]:hover { background: var(--off-soft); border-color: var(--line);
   font-size: var(--text-sm); color: var(--fg);
   overflow-wrap: anywhere;
 }
-.message.is-builtin { background: var(--surface-2); border-color: var(--line); }
-.message.is-builtin .message-body { background: var(--surface); }
+
+/* The chooser a new message starts from: three kinds, each a full button. */
+.kind-choice {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: .75rem; margin-bottom: 1.25rem;
+}
+.kind-choice button { display: block; text-align: left; padding: .875rem 1rem; }
+.kind-choice .choice-title { display: block; font-weight: 600; margin-bottom: .25rem; }
+
+/* A message-form section the chosen kind cannot use: visible so the form keeps
+   one shape across kinds, dimmed and disabled so it reads as not-in-play. */
+.field.grayed { opacity: .45; }
 
 /* ── Stat cards (Today) ─────────────────────────────────────────────────── */
 
