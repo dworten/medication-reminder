@@ -450,6 +450,19 @@ router.post('/sms-status', async (req, res) => {
           ? 'error 30034: this Twilio number is not registered for A2P 10DLC, so US carriers are blocking every text it sends'
           : 'check the Twilio console for this message SID',
       });
+
+      // And now it also reaches a phone — over voice by default, since the
+      // failure being reported is that SMS is not arriving. The row lookup is
+      // best-effort context; an alert with less detail still beats no alert.
+      const adminAlert = require('./adminAlert');
+      const row = await callHistoryRepo.findBySid(sid);
+      const about = row
+        ? `${row.schedule?.name || row.dose + ' dose'} — the alert to ${row.contact?.name || row.toPhone || 'the backup contact'}`
+        : `message ${sid}`;
+      adminAlert.notify('ALERT TEXT NOT DELIVERED',
+        `${about} was refused by the carrier (Twilio ${status}${errCode ? `, error ${errCode}` : ''})`
+        + (errCode === '30034' ? ' — the Twilio number is not A2P registered, so US carriers are blocking its texts' : '')
+        + '. The backup contact was NOT reached by SMS.');
     } else {
       logger.call('Alert text delivered', { sid });
     }

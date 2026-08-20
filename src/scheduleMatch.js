@@ -189,7 +189,32 @@ function findDue(schedules, now, graceMinutes) {
   return due;
 }
 
+// Why this schedule can NEVER fire — independent of the clock — or null when
+// its data is sound. evaluate() fails closed on these same three states, but
+// it does so silently, once a minute, forever: an enabled schedule with a bad
+// timezone was visible only as "never — check the days and time" in the UI.
+// The scheduler asks this so a never-firing schedule is loud in the logs too.
+//
+// The API refuses all three shapes, so a hit here means the row was edited by
+// hand or restored from a backup.
+function brokenReason(schedule) {
+  if (parseTimeOfDay(schedule.timeOfDay) === null) {
+    return `invalid timeOfDay "${schedule.timeOfDay}"`;
+  }
+
+  const days = Array.isArray(schedule.daysOfWeek) ? schedule.daysOfWeek : [];
+  if (!days.length) return 'no days of week selected';
+
+  try {
+    localParts(new Date(0), schedule.timezone);
+  } catch {
+    return `invalid timezone "${schedule.timezone}"`;
+  }
+
+  return null;
+}
+
 module.exports = {
-  parseTimeOfDay, localParts, evaluate, findDue, WEEKDAY_INDEX,
+  parseTimeOfDay, localParts, evaluate, findDue, brokenReason, WEEKDAY_INDEX,
   nextRunAt, localYMD, tzOffsetMs, wallClockToInstant,
 };

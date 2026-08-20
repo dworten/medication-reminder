@@ -106,4 +106,15 @@ check('unknown timezone → null',              nextIso({ ...morning, timezone: 
 check('no days selected → null',              nextIso({ ...morning, daysOfWeek: [] }, '2026-08-03T13:00:00Z'), null);
 check('malformed time → null',                nextIso({ ...morning, timeOfDay: '9:20' }, '2026-08-03T13:00:00Z'), null);
 
+console.log('\n--- brokenReason: a never-firing schedule is nameable, not just skipped ---');
+// evaluate() fails closed on these silently; brokenReason is what lets the
+// scheduler log WHY a row can never fire instead of skipping it forever.
+check('sound data → null',                    m.brokenReason(morning), null);
+check('bad timezone is named',                m.brokenReason({ ...morning, timezone: 'Mars/Olympus' }), 'invalid timezone "Mars/Olympus"');
+check('malformed time is named',              m.brokenReason({ ...morning, timeOfDay: '9:20' }), 'invalid timeOfDay "9:20"');
+check('empty days are named',                 m.brokenReason({ ...morning, daysOfWeek: [] }), 'no days of week selected');
+check('null days are named',                  m.brokenReason({ ...morning, daysOfWeek: null }), 'no days of week selected');
+// "wrong day today" is a working schedule, not a broken one.
+check('a day-limited schedule is not broken', m.brokenReason({ ...morning, daysOfWeek: [0] }), null);
+
 process.exitCode = summary() ? 1 : 0;

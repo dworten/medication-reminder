@@ -157,6 +157,87 @@ async function main() {
   after = await prisma.callHistory.findUnique({ where: { id: row.id } });
   check('and the item was closed out', after.nextRetryAt, null);
 
+  section('a child that FAILED at creation does not end the chain');
+  // Twilio refused the dial: the child row was opened before dialling and
+  // nothing ever rang. Treating that as "already placed" is how a transient
+  // outage used to kill the sequence with one warn line — no redial, no
+  // escalation. The bare child (no queued recovery, no children) is the
+  // crashed-mid-recovery shape; the sweeper reruns the failure ladder on it.
+  await truncateAll(prisma); await seedFixtures();
+  placed = [];
+  row = await queueRetry({ attempt: 1 });
+  const refused = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, parentId: row.id, dose: 'morning', attempt: 2,
+      kind: 'REMINDER_CALL', outcome: 'FAILED', // no callSid: never dialled
+    },
+  });
+  result = await sweeper.runOnce();
+  check('item completed', result.done, 1);
+  check('no dial straight from the parent', placed.length, 0);
+  let refusedAfter = await prisma.callHistory.findUnique({ where: { id: refused.id } });
+  check('the failure ladder queued a redial on the child', Boolean(refusedAfter.nextRetryAt), true);
+
+  // The revived child then fires like any other queued retry.
+  await prisma.callHistory.update({ where: { id: refused.id }, data: { nextRetryAt: new Date(Date.now() - 1000) } });
+  result = await sweeper.runOnce();
+  check('the redial went out', placed.length, 1);
+  check('as attempt 3', placed[0].attempt, 3);
+
+  section('a FAILED child WITH a call SID is a placed call, not a refused one');
+  // Twilio placed it and reported failure through the status callback, which
+  // schedules its own recovery. Redialling from here would race that.
+  await truncateAll(prisma); await seedFixtures();
+  placed = [];
+  row = await queueRetry({ attempt: 1 });
+  const placedThenFailed = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, parentId: row.id, dose: 'morning', attempt: 2,
+      kind: 'REMINDER_CALL', outcome: 'FAILED', callSid: 'CA_PLACED_THEN_FAILED',
+    },
+  });
+  result = await sweeper.runOnce();
+  check('no second dial', placed.length, 0);
+  after = await prisma.callHistory.findUnique({ where: { id: placedThenFailed.id } });
+  check('the child was left alone', after.nextRetryAt, null);
+
+  section('a never-dialled child whose recovery is already queued is left alone');
+  await truncateAll(prisma); await seedFixtures();
+  placed = [];
+  row = await queueRetry({ attempt: 1 });
+  const recovering = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, parentId: row.id, dose: 'morning', attempt: 2,
+      kind: 'REMINDER_CALL', outcome: 'FAILED',
+      nextRetryAt: new Date(Date.now() + 30 * 60 * 1000),
+    },
+  });
+  result = await sweeper.runOnce();
+  check('no dial', placed.length, 0);
+  after = await prisma.callHistory.findUnique({ where: { id: recovering.id } });
+  check('its own schedule was not moved',
+    Math.round((after.nextRetryAt - Date.now()) / 60000) >= 25, true);
+
+  section('a never-dialled FINAL attempt escalates when its recovery was lost');
+  await truncateAll(prisma); await seedFixtures();
+  placed = []; texted = [];
+  row = await queueRetry({ attempt: 2 });
+  const lastRefused = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, parentId: row.id, dose: 'morning', attempt: 3,
+      kind: 'REMINDER_CALL', outcome: 'FAILED',
+    },
+  });
+  result = await sweeper.runOnce();
+  check('no redial past the attempt budget', placed.length, 0);
+  const rescue = await prisma.callHistory.findFirst({ where: { kind: 'ESCALATION_SMS' } });
+  check('escalation queued instead', Boolean(rescue), true);
+  check('under the refused attempt', rescue && rescue.parentId, lastRefused.id);
+
   section('a SEPARATE call\'s retry is not mistaken for this one');
   // Two test calls in one morning. Both are attempt 1 of the same schedule and
   // dose, so matching on (schedule, dose, attempt) inside a time window made the
@@ -427,6 +508,126 @@ async function main() {
   check('no retry queued on top of the escalation', after.nextRetryAt, null);
   check('still exactly one escalation',
     await prisma.callHistory.count({ where: { kind: { not: 'REMINDER_CALL' } } }), escCount);
+
+  // ── the stale-PENDING watchdog ───────────────────────────────────────────
+  //
+  // Everything after "call created" arrives by webhook. These rows are what a
+  // lost callback leaves behind: PENDING, no next_retry_at, invisible to the
+  // queue. The watchdog is what stops that state from lasting for days.
+
+  const staleAge = () => new Date(Date.now() - (config.pendingWatchdogMinutes + 10) * 60 * 1000);
+
+  section('watchdog: a call whose callback never came is failed and retried');
+  await truncateAll(prisma); await seedFixtures();
+  placed = []; texted = [];
+  row = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, dose: 'morning', attempt: 1,
+      kind: 'REMINDER_CALL', outcome: 'PENDING', callSid: 'CA_NO_CALLBACK',
+      startedAt: staleAge(),
+    },
+  });
+  let wd = await sweeper.watchdogOnce();
+  check('one row flagged', wd.flagged, 1);
+  after = await prisma.callHistory.findUnique({ where: { id: row.id } });
+  check('flipped to FAILED', after.outcome, 'FAILED');
+  check('says the callback never came', after.errorMessage.includes('status callback'), true);
+  check('a redial was queued', Boolean(after.nextRetryAt), true);
+  check('no escalation on a first attempt', texted.length, 0);
+
+  section('watchdog: a fresh PENDING call is left alone');
+  await truncateAll(prisma); await seedFixtures();
+  row = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, dose: 'morning', attempt: 1,
+      kind: 'REMINDER_CALL', outcome: 'PENDING', callSid: 'CA_IN_FLIGHT',
+      startedAt: new Date(Date.now() - 5 * 60 * 1000),
+    },
+  });
+  wd = await sweeper.watchdogOnce();
+  check('nothing flagged', wd.flagged, 0);
+  after = await prisma.callHistory.findUnique({ where: { id: row.id } });
+  check('still PENDING', after.outcome, 'PENDING');
+
+  section('watchdog: queued work is the sweeper\'s business, not the watchdog\'s');
+  await truncateAll(prisma); await seedFixtures();
+  row = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, dose: 'morning', attempt: 1,
+      kind: 'REMINDER_CALL', outcome: 'PENDING',
+      startedAt: staleAge(), nextRetryAt: new Date(Date.now() + 60 * 60 * 1000),
+    },
+  });
+  wd = await sweeper.watchdogOnce();
+  check('a row in the retry queue is not touched', wd.flagged, 0);
+
+  section('watchdog: a stale FINAL attempt escalates');
+  await truncateAll(prisma); await seedFixtures();
+  texted = [];
+  row = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.contact.id, dose: 'evening', attempt: 3,
+      kind: 'REMINDER_CALL', outcome: 'PENDING', callSid: 'CA_LAST_STALE',
+      startedAt: staleAge(),
+    },
+  });
+  wd = await sweeper.watchdogOnce();
+  check('flagged', wd.flagged, 1);
+  after = await prisma.callHistory.findUnique({ where: { id: row.id } });
+  check('flipped to FAILED', after.outcome, 'FAILED');
+  check('no redial past the attempt budget', after.nextRetryAt, null);
+  const wdEsc = await prisma.callHistory.findFirst({ where: { kind: 'ESCALATION_SMS' } });
+  check('escalation queued', Boolean(wdEsc), true);
+  check('under the stale attempt', wdEsc && wdEsc.parentId, row.id);
+
+  section('watchdog: a stale queued escalation SMS is requeued, not failed');
+  await truncateAll(prisma); await seedFixtures();
+  row = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.caregiver.id, dose: 'morning', attempt: 1,
+      kind: 'ESCALATION_SMS', outcome: 'PENDING', errorMessage: 'no answer after all 3 attempts',
+      startedAt: staleAge(),
+    },
+  });
+  wd = await sweeper.watchdogOnce();
+  check('flagged', wd.flagged, 1);
+  after = await prisma.callHistory.findUnique({ where: { id: row.id } });
+  check('still PENDING — an alert is never written off', after.outcome, 'PENDING');
+  check('back in the queue', Boolean(after.nextRetryAt), true);
+
+  section('watchdog: a stale escalation call closes out and the text still goes');
+  await truncateAll(prisma); await seedFixtures();
+  texted = [];
+  const escCall = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.caregiver.id, dose: 'morning', attempt: 1,
+      kind: 'ESCALATION_CALL', outcome: 'PENDING', callSid: 'CA_ESC_STALE',
+      startedAt: staleAge(),
+    },
+  });
+  const followUp = await prisma.callHistory.create({
+    data: {
+      accountId: fixtures.account.id, scheduleId: fixtures.schedule.id,
+      contactId: fixtures.caregiver.id, parentId: escCall.id, dose: 'morning', attempt: 1,
+      kind: 'ESCALATION_SMS', outcome: 'PENDING', errorMessage: 'no answer after all 3 attempts',
+      startedAt: staleAge(), nextRetryAt: new Date(Date.now() + 60 * 60 * 1000),
+    },
+  });
+  wd = await sweeper.watchdogOnce();
+  check('the call step was flagged', wd.flagged, 1);
+  after = await prisma.callHistory.findUnique({ where: { id: escCall.id } });
+  check('flipped to FAILED', after.outcome, 'FAILED');
+  const textArrived = await waitFor(async () => {
+    const r = await prisma.callHistory.findUnique({ where: { id: followUp.id } });
+    return r.outcome === 'SENT' || (r.nextRetryAt !== null && r.nextRetryAt <= new Date());
+  });
+  check('the follow-up text was pulled forward', textArrived, true);
 
   await truncateAll(prisma);
   process.exitCode = summary() ? 1 : 0;

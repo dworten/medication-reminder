@@ -20,6 +20,10 @@
 // needed no new machinery to carry it — an escalation call is just another due
 // item, and the SMS that follows it is another one behind that.
 //
+// The same tick also runs the stale-PENDING watchdog (see watchdogOnce): rows
+// whose Twilio status callback never arrived, which the queue cannot see
+// because a stuck row has no next_retry_at.
+//
 // Ordering is claim → do → complete. Completing (clearing next_retry_at) is
 // last on purpose: if the process dies mid-flight the item stays queued, so the
 // failure mode is a repeat rather than a loss. Repeats are then suppressed by
@@ -56,8 +60,41 @@ async function _fireRetry(row, now) {
   const already = await callHistoryRepo.findChildByKind(row.id, 'REMINDER_CALL');
 
   if (already) {
-    logger.warn('Retry already placed by an earlier run, skipping', {
-      callHistoryId: row.id, dose: row.dose, attempt: nextAttempt,
+    // A child row is not, by itself, proof the phone rang. FAILED with no call
+    // SID means Twilio refused the creation — the row was opened before
+    // dialling and nothing ever went out. Every other state is a call that was
+    // (or, on an ambiguous timeout, may have been) placed, and re-dialling
+    // those risks ringing her twice, which stays the worse failure.
+    const neverDialled = already.outcome === 'FAILED' && !already.callSid;
+
+    if (!neverDialled) {
+      logger.warn('Retry already placed by an earlier run, skipping', {
+        callHistoryId: row.id, dose: row.dose, attempt: nextAttempt,
+      });
+      return;
+    }
+
+    // A dial that failed at creation queues its own recovery — a redial on the
+    // child, or an escalation under it (see _realCall's failure path). Only a
+    // crash between the FAILED write and that recovery leaves the child bare,
+    // and treating it as "already placed" there is how a chain used to die
+    // with one warn line and nobody alerted. Rerun the failure ladder on the
+    // child instead: it redials within the attempt budget and escalates past
+    // it, and escalate()'s own child check keeps a rerun from alerting twice.
+    const recovered = already.nextRetryAt || (await callHistoryRepo.hasAnyChild(already.id));
+
+    if (recovered) {
+      logger.info('Retry child was never dialled; its recovery is already queued', {
+        callHistoryId: row.id, childId: already.id,
+      });
+      return;
+    }
+
+    logger.warn('Retry child was never dialled and its recovery was lost — rerunning the failure ladder', {
+      callHistoryId: row.id, childId: already.id, attempt: already.attempt,
+    });
+    await callManager.handleNoAnswer(row.dose, already.attempt, {
+      scheduleId: row.scheduleId, callHistoryId: already.id, outcome: 'FAILED',
     });
     return;
   }
@@ -192,6 +229,111 @@ async function runOnce(now = new Date()) {
   return { found, claimed, done, failed, abandoned };
 }
 
+// ─── Stale-PENDING watchdog ──────────────────────────────────────────────────
+//
+// Everything after "call created" arrives by Twilio webhook: no-answer, busy,
+// completed, the delivery receipt. If callbacks stop reaching this server —
+// BASE_URL drift after a domain change, a Twilio callback outage — every call
+// sits PENDING forever, no retry is persisted, no escalation fires, and the
+// queue sees nothing because a stuck row has no next_retry_at. That is the
+// mechanism by which a broken webhook URL runs for days looking quiet.
+//
+// This finds rows still PENDING well past when any legitimate call would have
+// resolved and treats them as unresolved. Two shapes of stuck row, two
+// treatments:
+//
+//   queued work that never ran (an escalation step with no SID, killed between
+//   being queued and being delivered) → put back in the queue; the sweeper's
+//   own give-up ceiling still bounds it.
+//
+//   a call placed (or mid-dial) whose fate never came back → flip it FAILED —
+//   the honest available outcome for "we cannot say this succeeded" — and run
+//   the same ladder a failed call takes: retry within the attempt budget,
+//   escalate past it. The escalation SMS needs only the outbound API, so even
+//   with inbound webhooks completely dark, the caregiver still hears.
+async function watchdogOnce(now = new Date()) {
+  if (!db.isConfigured()) return { flagged: 0 };
+
+  const minutes = config.pendingWatchdogMinutes;
+  if (!(minutes > 0)) return { flagged: 0 };
+
+  const cutoff = new Date(now.getTime() - minutes * 60 * 1000);
+
+  let stale;
+  try {
+    stale = await callHistoryRepo.findStalePending(cutoff);
+  } catch (err) {
+    logger.error('Watchdog could not load stale PENDING rows', { error: err.message });
+    return { flagged: 0 };
+  }
+  if (!stale.length) return { flagged: 0 };
+
+  const callManager = require('./callManager');
+  let flagged = 0;
+
+  for (const row of stale) {
+    try {
+      if (row.kind === 'ESCALATION_SMS' || (row.kind === 'ESCALATION_CALL' && !row.callSid)) {
+        logger.error('QUEUED WORK WENT STALE — requeueing an escalation step that never ran', {
+          callHistoryId: row.id, kind: row.kind, dose: row.dose,
+          ageMinutes: Math.round((now - new Date(row.startedAt)) / 60000),
+        });
+        await callHistoryRepo.scheduleRetry(row.id, now);
+        flagged++;
+        continue;
+      }
+
+      // The conditional flip doubles as the claim: exactly one process wins
+      // PENDING → FAILED, so two replicas cannot both run the ladder — and a
+      // confirmation that lands in the same instant wins instead of losing.
+      const won = await callHistoryRepo.closeIfPending(row.id, 'FAILED', {
+        errorMessage: `no status callback within ${minutes} minutes — webhook loss or BASE_URL problem`,
+      });
+      if (!won) continue;
+
+      // Distinct wording on purpose: this is how a callback-loss reads
+      // differently from a normal no-answer in the logs.
+      const ageMinutes = Math.round((now - new Date(row.startedAt)) / 60000);
+      logger.error('CALL NEVER RESOLVED — no Twilio status callback arrived; treating the attempt as failed', {
+        callHistoryId: row.id, kind: row.kind, dose: row.dose, attempt: row.attempt,
+        callSid: row.callSid || '(none)',
+        ageMinutes,
+        hint: 'if this repeats, check BASE_URL and the Twilio console — status callbacks may not be reaching this server',
+      });
+
+      // This is the BASE_URL-drift failure mode running quietly, so it goes to
+      // the admin too. The storm guard collapses a sweep full of stale rows
+      // into one alert.
+      require('./adminAlert').notify('CALL NEVER RESOLVED',
+        `${row.schedule?.name || row.kind} (${row.dose}, attempt ${row.attempt}) to `
+        + `${row.contact?.name || row.toPhone || 'unknown'} got no Twilio status callback in ${ageMinutes} minutes. `
+        + 'Retrying/escalating it now — but check BASE_URL and Twilio webhooks; callbacks may not be reaching the server.');
+
+      if (row.kind === 'ESCALATION_CALL') {
+        // The follow-up SMS was queued before the call was dialled and is
+        // delivered independently, so the alert has almost certainly gone out
+        // already; this closes the call step and pulls the text forward if it
+        // is somehow still waiting.
+        const followUp = await callHistoryRepo.findChildByKind(row.id, 'ESCALATION_SMS');
+        await callManager.handleEscalationCallEnded(row.dose, {
+          callHistoryId: row.id, followUpId: followUp ? followUp.id : null,
+        });
+      } else {
+        await callManager.handleNoAnswer(row.dose, row.attempt, {
+          scheduleId: row.scheduleId, callHistoryId: row.id, outcome: 'FAILED',
+        });
+      }
+      flagged++;
+    } catch (err) {
+      logger.error('Watchdog could not resolve a stale row', {
+        callHistoryId: row.id, error: err.message,
+      });
+    }
+  }
+
+  return { flagged };
+}
+
 async function tick(now = new Date()) {
   if (_sweeping) {
     logger.warn('Sweeper still running, skipping this minute');
@@ -208,6 +350,9 @@ async function tick(now = new Date()) {
     // silently did nothing — and it is invisible if only successes are logged.
     // Quiet sweeps stay quiet, so this does not add a line a minute.
     if (result.found) logger.info('Sweeper ran', result);
+
+    const watched = await watchdogOnce(now);
+    if (watched.flagged) logger.info('Watchdog acted on stale rows', watched);
   } finally {
     _sweeping = false;
   }
@@ -234,4 +379,4 @@ function stop() {
   _task = null;
 }
 
-module.exports = { start, stop, tick, runOnce };
+module.exports = { start, stop, tick, runOnce, watchdogOnce };

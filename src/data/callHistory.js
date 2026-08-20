@@ -76,12 +76,16 @@ async function recordOutcome(id, outcome, extra = {}) {
 // The PENDING guard is the whole point: Twilio's "completed" status can arrive
 // either side of the /response webhook that recorded CONFIRMED, and an
 // unguarded write would silently turn a confirmed dose into a missed one.
-async function closeIfPending(id, outcome) {
+async function closeIfPending(id, outcome, extra = {}) {
   if (!id) return null;
   return _try('closeIfPending', async (p) => {
     const result = await p.callHistory.updateMany({
       where: { id, outcome: 'PENDING' },
-      data:  { outcome, completedAt: new Date() },
+      data:  {
+        outcome,
+        completedAt: new Date(),
+        ...(extra.errorMessage !== undefined && { errorMessage: extra.errorMessage }),
+      },
     });
     return result.count === 1;
   });
@@ -233,6 +237,57 @@ async function findChildByKind(parentId, kind) {
   });
 }
 
+// Whether anything at all hangs off this row, whatever its kind. The sweeper
+// asks this of a retry child that failed at creation: a redial or an
+// escalation under it means its recovery is alive, and rerunning the failure
+// ladder would act twice.
+async function hasAnyChild(parentId) {
+  if (!parentId) return false;
+  const count = await db.getClient().callHistory.count({ where: { parentId } });
+  return count > 0;
+}
+
+// The watchdog's feed: rows the call path has forgotten. Still PENDING, not
+// sitting in the retry queue (a queued row is the sweeper's business, and its
+// give-up ceiling already bounds it), and old enough that any legitimate call
+// would long since have resolved. These are the rows whose Twilio status
+// callback never arrived — and with no next_retry_at, nothing else can ever
+// see them. Throws like the rest of the queue functions: the watchdog's
+// correctness depends on this read. Relations ride along so the admin alert
+// can name the schedule and the person instead of quoting a UUID.
+async function findStalePending(cutoff, limit = 25) {
+  return db.getClient().callHistory.findMany({
+    where:   { outcome: 'PENDING', nextRetryAt: null, startedAt: { lt: cutoff } },
+    include: SWEEP_INCLUDE,
+    orderBy: { startedAt: 'asc' },
+    take:    limit,
+  });
+}
+
+// The row behind a Twilio SID, for the delivery-failure alert: the callback
+// carries only the SID, and "which schedule, which person" has to come from
+// here. Best-effort — an alert with less context still beats no alert.
+async function findBySid(callSid) {
+  if (!callSid) return null;
+  return _try('findBySid', (p) =>
+    p.callHistory.findFirst({
+      where:   { callSid },
+      include: { schedule: { select: { id: true, name: true } }, contact: true },
+    })
+  );
+}
+
+// The day's story in one query, for the heartbeat. Counts by kind and outcome;
+// the composition into a sentence lives with the heartbeat, not here.
+async function summarizeSince(since) {
+  const groups = await db.getClient().callHistory.groupBy({
+    by:     ['kind', 'outcome'],
+    where:  { startedAt: { gte: since } },
+    _count: { _all: true },
+  });
+  return groups.map((g) => ({ kind: g.kind, outcome: g.outcome, count: g._count._all }));
+}
+
 // The whole chain from one row down, oldest first. Read-only — for `npm run
 // db:history` today and the Phase 3 API later.
 async function chainFrom(rootId) {
@@ -359,6 +414,7 @@ module.exports = {
   startAttempt, attachCallSid, recordOutcome, closeIfPending, findById, recentForSchedule,
   scheduleRetry, findDueWork, claimWork, completeWork, releaseClaim,
   enqueueEscalation, countPendingWork, SWEEP_INCLUDE,
-  findChildByKind, chainFrom, makeDueNow, currentOutcome,
+  findChildByKind, hasAnyChild, findStalePending, findBySid, summarizeSince,
+  chainFrom, makeDueNow, currentOutcome,
   recordDestination, listForAccount, recordDeliveryOutcome,
 };

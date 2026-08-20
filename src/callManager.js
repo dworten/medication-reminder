@@ -1,7 +1,8 @@
 'use strict';
 
-const config = require('./config');
-const logger = require('./logger');
+const config     = require('./config');
+const logger     = require('./logger');
+const adminAlert = require('./adminAlert');
 
 const accountRepo     = require('./data/accounts');
 const scheduleRepo    = require('./data/schedules');
@@ -42,6 +43,11 @@ function resolveSettings(schedule) {
 //   schedule       a schedule row WITH relations (contact, message, escalation)
 //   callHistoryId  an existing row to attach to, for retries
 //   accountId      used when there is no schedule to take it from
+//
+// A Twilio failure at dial time resolves (to null) rather than rejecting:
+// _realCall degrades it into the same retry-then-escalate ladder an unanswered
+// call takes, so the caller has nothing useful to do with the error. It still
+// throws for a missing destination, which no retry can fix.
 async function initiateCall(dose, attempt, options = {}) {
   const schedule = options.schedule || null;
   const settings = resolveSettings(schedule);
@@ -161,13 +167,12 @@ async function _realCall(dose, attempt, ctx) {
     throw new Error('No destination phone number set — check the schedule\'s contact, or GRANDMA_PHONE_NUMBER / TEST_PHONE_NUMBER in .env');
   }
 
-  const client = _twilioClient();
   const { callUrl, statusUrl } = _webhookUrls({ dose, attempt, ...ctx });
 
   logger.call('Placing call', { dose, attempt, to, scheduleId: ctx.schedule?.id, callHistoryId });
 
   try {
-    const call = await client.calls.create({
+    const call = await module.exports.placeReminderCall({
       to,
       from:                 config.twilioFromNumber,
       url:                  callUrl,
@@ -184,8 +189,34 @@ async function _realCall(dose, attempt, ctx) {
     await callHistoryRepo.attachCallSid(callHistoryId, call.sid);
     return call.sid;
   } catch (err) {
+    // A call that never left the building must degrade the same way an
+    // unanswered one does — retry, then escalate — rather than losing the
+    // occurrence. Marking the row FAILED and rethrowing, which is what this
+    // used to do, left the schedule claimed for the day: the next tick
+    // skipped it, no retry was queued, and a 30-second Twilio blip at 9:20
+    // cost the whole dose with nothing but a log line to show for it.
+    //
+    // handleNoAnswer is reused deliberately rather than a parallel ladder:
+    // Twilio's status callback already routes a placed-then-failed call
+    // through it with outcome FAILED, so a call that failed at creation now
+    // takes exactly the path of one that failed after. The FAILED write here
+    // (before the ladder re-writes it) is what carries err.message onto the
+    // row; recordOutcome leaves errorMessage alone when not given one.
+    //
+    // If the throw was a timeout and the call WAS created, its webhooks will
+    // arrive and may schedule the same retry again — scheduleRetry just
+    // resets next_retry_at, and the sweeper's child check keeps a redial
+    // that already went out from going out twice.
+    logger.error('CALL NOT PLACED — Twilio refused or was unreachable at dial time', {
+      dose, attempt, to, error: err.message, callHistoryId, scheduleId: ctx.schedule?.id,
+    });
     await callHistoryRepo.recordOutcome(callHistoryId, 'FAILED', { errorMessage: err.message });
-    throw err;
+    await handleNoAnswer(dose, attempt, {
+      scheduleId: ctx.schedule ? ctx.schedule.id : null,
+      callHistoryId,
+      outcome: 'FAILED',
+    });
+    return null;
   }
 }
 
@@ -203,12 +234,13 @@ async function loadScheduleContext(scheduleId) {
 }
 
 // Why the attempts ran out, in the words the caregiver's alert will carry.
-// "No answer" is wrong for a call she picked up and hung up on, and that
+// "No answer" is wrong for a call she picked up and hung up on, and equally
+// wrong for one that Twilio refused to place — her phone never rang, and that
 // distinction is the whole reason someone is being woken up.
 function _exhaustedReason(outcome, maxAttempts) {
-  return outcome === 'NOT_CONFIRMED'
-    ? `answered without confirming, after all ${maxAttempts} attempts`
-    : `no answer after all ${maxAttempts} attempts`;
+  if (outcome === 'NOT_CONFIRMED') return `answered without confirming, after all ${maxAttempts} attempts`;
+  if (outcome === 'FAILED')        return `the call could not be placed, after all ${maxAttempts} attempts`;
+  return `no answer after all ${maxAttempts} attempts`;
 }
 
 // Triggered by Twilio status callback when a call goes unanswered, and by
@@ -247,6 +279,9 @@ async function handleNoAnswer(dose, attempt, ctx = {}) {
       logger.error('RETRY LOST — could not persist next_retry_at; escalating instead', {
         dose, nextAttempt: next, callHistoryId: ctx.callHistoryId,
       });
+      adminAlert.notify('RETRY LOST',
+        `${schedule?.name || 'manual call'} (${dose}) to ${schedule?.contact?.name || 'the recipient'}: `
+        + `retry #${next} could not be written — database unavailable. Escalating to the backup contact instead.`);
       await escalate(dose, 'retry could not be scheduled (database unavailable)', schedule, ctx);
     }
   } else {
@@ -372,6 +407,9 @@ async function escalate(dose, reason, schedule = null, ctx = {}) {
     logger.error('NOBODY WILL BE ALERTED — this schedule escalates with neither a call nor an SMS', {
       dose, reason, scheduleId: schedule ? schedule.id : null,
     });
+    adminAlert.notify('NOBODY WILL BE ALERTED',
+      `${schedule?.name || 'manual call'} (${dose}): ${reason} — but this schedule escalates with `
+      + 'neither a call nor an SMS, so no backup contact was told. Fix its escalation settings.');
     return;
   }
 
@@ -431,7 +469,9 @@ async function escalate(dose, reason, schedule = null, ctx = {}) {
     // generic handler error three frames up — this is the case where a missed
     // dose goes unnoticed by anyone.
     try {
-      await _sendEscalationInline(dose, reason, schedule);
+      await _sendEscalationInline(dose, reason, schedule, {
+        accountId, scheduleId: ctx.scheduleId, parentId: ctx.callHistoryId || null,
+      });
     } catch (sendErr) {
       logger.error('ESCALATION LOST — could not queue it and could not send it', {
         dose,
@@ -439,6 +479,9 @@ async function escalate(dose, reason, schedule = null, ctx = {}) {
         queueError: err.message,
         sendError:  sendErr.message,
       });
+      adminAlert.notify('ESCALATION LOST',
+        `${schedule?.name || 'manual call'} (${dose}): ${reason}. The backup contact was NOT told — `
+        + `the alert could not be queued (${err.message}) or sent (${sendErr.message}).`);
     }
   }
 }
@@ -466,9 +509,20 @@ function _escalationBody(dose, reason, timezone, extra = '') {
   return extra ? `${base} ${extra}` : base;
 }
 
-// Last resort when the row could not be written at all. Not durable — but an
-// alert attempted is better than no alert.
-async function _sendEscalationInline(dose, reason, schedule) {
+// Last resort when the queue write failed. Not durable — but an alert
+// attempted is better than no alert.
+//
+// It still tries to leave a call_history row, because this used to be the one
+// send with no row at all: its delivery receipt matched nothing, and an
+// undelivered last-resort alert — the path that runs precisely when everything
+// else is failing — was visible only as an info line. The row is best-effort
+// (startAttempt swallows failure, and when the queue write failed the row
+// write usually fails with it), but whenever it CAN be written, the receipt
+// has somewhere to land, a carrier rejection logs as ALERT TEXT NOT DELIVERED
+// — and if the send itself dies after the row exists, the row sits PENDING
+// with no queue entry, which is exactly what the stale-PENDING watchdog
+// requeues. The last resort stops being the one path that can fail invisibly.
+async function _sendEscalationInline(dose, reason, schedule, ctx = {}) {
   const smsAlert = require('./smsAlert');
 
   const to = (schedule && schedule.escalationContact && schedule.escalationContact.phone)
@@ -479,7 +533,31 @@ async function _sendEscalationInline(dose, reason, schedule) {
     return;
   }
 
-  await smsAlert.send(to, _escalationBody(dose, reason, schedule && schedule.timezone));
+  const accountId = ctx.accountId || (schedule && schedule.accountId) || null;
+  let row = null;
+  if (accountId) {
+    row = await callHistoryRepo.startAttempt({
+      accountId,
+      scheduleId: schedule ? schedule.id : (ctx.scheduleId || null),
+      contactId:  (schedule && schedule.escalationContact && schedule.escalationContact.id) || null,
+      toPhone:    to,
+      parentId:   ctx.parentId || null,
+      dose,
+      attempt:    1,
+      kind:       'ESCALATION_SMS',
+    });
+  }
+
+  const sid = await smsAlert.send(to, _escalationBody(dose, reason, schedule && schedule.timezone));
+
+  if (row) {
+    // SID first, same as deliverEscalation: it is the only handle the delivery
+    // receipt arrives with, and Twilio can deliver one within milliseconds.
+    if (sid) await callHistoryRepo.attachCallSid(row.id, sid);
+    await callHistoryRepo.recordOutcome(row.id, 'SENT', {
+      errorMessage: `${reason} | sent inline (queue unavailable)`,
+    });
+  }
 }
 
 function _escalationDestination(row) {
@@ -659,9 +737,16 @@ async function deliverEscalationCall(row) {
   logger.call('Escalation call placed', { sid: call.sid, callHistoryId: row.id, to });
 }
 
-// The escalation call's outbound edge. Deliberately separate from _realCall,
-// which is the reminder path and is left exactly as it was.
+// The two outbound voice edges. Identical requests, deliberately separate
+// functions, each called through module.exports: the test suite can intercept
+// — or fail — one path's dial without touching the other's, and everything
+// above the edge (queueing, links, idempotency, the failure ladder) then runs
+// for real.
 async function placeVoiceCall(params) {
+  return _twilioClient().calls.create(params);
+}
+
+async function placeReminderCall(params) {
   return _twilioClient().calls.create(params);
 }
 
@@ -726,6 +811,7 @@ module.exports = {
   deliverEscalation,
   deliverEscalationCall,
   placeVoiceCall,
+  placeReminderCall,
   resolveSettings,
   loadScheduleContext,
 };

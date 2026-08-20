@@ -139,6 +139,57 @@ const config = {
   // and without a ceiling a permanently failing item would be retried forever.
   retryGiveUpHours: parseInt(process.env.RETRY_GIVE_UP_HOURS || '6', 10),
 
+  // Stale-PENDING watchdog.
+  //
+  // Everything after "call created" arrives by Twilio webhook. If callbacks
+  // stop reaching this server — BASE_URL drift, a Twilio callback outage —
+  // every call sits PENDING forever and the retry/escalation machinery never
+  // engages. The watchdog treats a row still PENDING after this many minutes
+  // as unresolved and runs the failure ladder on it.
+  //
+  // The floor is not negotiable downward: a threshold shorter than the longest
+  // legitimate call would flag a call still in progress, and the queued redial
+  // could then ring her after she confirmed. Calls here are bounded well under
+  // ten minutes. 0 (or negative) disables the watchdog entirely.
+  pendingWatchdogMinutes: (() => {
+    const raw = parseInt(process.env.PENDING_WATCHDOG_MINUTES || '30', 10);
+    return raw > 0 ? Math.max(raw, 10) : 0;
+  })(),
+
+  // Admin alerts — the alerts about failed alerts.
+  //
+  // The worst cases in this system (RETRY LOST, ESCALATION LOST, ALERT TEXT
+  // NOT DELIVERED, NOBODY WILL BE ALERTED, CALL NEVER RESOLVED) end in a
+  // logger.error, and nobody reads logs at 9:20 PM. When ADMIN_ALERT_PHONE is
+  // set, those events also reach that phone. Unset, they stay log-only and the
+  // app says so once at boot.
+  //
+  // The channel defaults to a voice call, not a text: one of the events being
+  // reported is "SMS is not being delivered" (A2P 10DLC blocking), and an
+  // alert that rides the broken channel arrives never. The call carries its
+  // TwiML inline, so it works even when BASE_URL and the webhooks are wrong —
+  // which is another of the events being reported. Either channel falls back
+  // to the other on failure.
+  adminAlertPhone: (process.env.ADMIN_ALERT_PHONE || '').trim(),
+  adminAlertChannel: (() => {
+    const raw = (process.env.ADMIN_ALERT_CHANNEL || 'call').trim().toLowerCase();
+    return ['sms', 'call', 'both'].includes(raw) ? raw : 'call';
+  })(),
+
+  // Storm guard: the same event alerts at most once per this window; repeats
+  // are counted and the count rides on the next alert through.
+  adminAlertCooldownMinutes: parseInt(process.env.ADMIN_ALERT_COOLDOWN_MINUTES || '60', 10),
+
+  // Daily heartbeat hour (0-23, in TIMEZONE above). One message a day saying
+  // the system is alive and what it did, so silence stops being ambiguous.
+  // Anything that does not parse as 0-23 disables it. Default: 8
+  adminHeartbeatHour: (() => {
+    const raw = process.env.ADMIN_HEARTBEAT_HOUR;
+    if (raw === undefined || raw === '') return 8;
+    const n = parseInt(raw, 10);
+    return Number.isInteger(n) && n >= 0 && n <= 23 ? n : null;
+  })(),
+
   // Answering-machine detection.
   //
   // Without it, voicemail counts as an answered call: the reminder plays into

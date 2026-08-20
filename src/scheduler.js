@@ -28,6 +28,32 @@ let _task       = null;
 let _ticking    = false;
 let _warnedNoDb = false;
 
+// A schedule with data that fails closed (bad timezone, malformed time, empty
+// days) is skipped by evaluate() silently, once a minute, forever. Warn about
+// it loudly — but not 1440 times a day: once per schedule per interval, and a
+// row that gets fixed drops out so a later regression warns afresh.
+const _brokenWarnedAt = new Map(); // scheduleId → last warned (ms)
+const BROKEN_WARN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+function _warnAboutBroken(schedules, now) {
+  for (const schedule of schedules) {
+    const reason = scheduleMatch.brokenReason(schedule);
+    if (!reason) {
+      _brokenWarnedAt.delete(schedule.id);
+      continue;
+    }
+
+    const last = _brokenWarnedAt.get(schedule.id) || 0;
+    if (now.getTime() - last < BROKEN_WARN_INTERVAL_MS) continue;
+    _brokenWarnedAt.set(schedule.id, now.getTime());
+
+    logger.error('Schedule can NEVER fire — its data fails closed and it is silently skipped every minute', {
+      scheduleId: schedule.id, name: schedule.name, reason,
+      hint: 'this row was edited outside the app or restored from a backup; the API would have refused it',
+    });
+  }
+}
+
 // The claim window must exceed the grace window, or a catch-up tick would
 // re-fire a call that already went out. One extra minute covers a tick that
 // straddles the boundary.
@@ -64,6 +90,8 @@ async function tick(now = new Date()) {
       logger.error('Scheduler could not load schedules', { error: err.message });
       return;
     }
+
+    _warnAboutBroken(schedules, now);
 
     const due = scheduleMatch.findDue(schedules, now, config.scheduleGraceMinutes);
     if (!due.length) return;

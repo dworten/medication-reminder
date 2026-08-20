@@ -13,6 +13,7 @@ const logger      = require('./src/logger');
 const twimlRouter = require('./src/twimlHandler');
 const scheduler    = require('./src/scheduler');
 const retrySweeper = require('./src/retrySweeper');
+const adminAlert   = require('./src/adminAlert');
 const callManager  = require('./src/callManager');
 const database     = require('./src/db');
 const { requireTriggerSecret } = require('./src/security');
@@ -270,6 +271,19 @@ if (testIdx !== -1) {
   assertMockModeIsRunnable();
   assertConfigIsValid();
 
+  // The webhook signature check is the only thing standing between the public
+  // /webhook routes and anyone who finds the URL — those routes drive real
+  // calls, retries and alerts. Turning it off is a legitimate local debugging
+  // move and a silent hole anywhere else, so switching it off is never quiet.
+  if (!config.validateTwilioSignature) {
+    const detail = {
+      fix: 'set VALIDATE_TWILIO_SIGNATURE=true (and TWILIO_AUTH_TOKEN) unless you are curl-testing locally',
+    };
+    const message = 'WEBHOOKS ARE UNAUTHENTICATED — VALIDATE_TWILIO_SIGNATURE=false, so anyone who finds the URL can drive the call flow';
+    if (config.mockMode) logger.warn(message, detail);
+    else                 logger.error(message, detail);
+  }
+
   // Bind 0.0.0.0 explicitly. Node's default (:: with IPv4 fallback) already
   // accepts external connections, but Railway's edge connects over IPv4 and
   // their docs call for 0.0.0.0 — being explicit removes it as a suspect.
@@ -292,6 +306,11 @@ if (testIdx !== -1) {
     // before a restart is picked up by whichever process comes back, which is
     // the whole point of persisting it.
     retrySweeper.start();
+
+    // Admin alerts and the daily heartbeat. Says so at boot when
+    // ADMIN_ALERT_PHONE is unset, because "failures are log-only" is a state
+    // the operator should have chosen, not discovered.
+    adminAlert.start();
 
     if (config.mockMode) {
       console.log('');
@@ -318,6 +337,7 @@ if (testIdx !== -1) {
 
     scheduler.stop();
     retrySweeper.stop();
+    adminAlert.stop();
     server.close(async () => {
       await database.disconnect();
       logger.info('Shutdown complete');
